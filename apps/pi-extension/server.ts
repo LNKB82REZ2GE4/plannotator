@@ -619,9 +619,15 @@ function injectAnnotateCloseControls(htmlContent: string): string {
 })();
 </script>`;
 
-  return htmlContent.includes('</body>')
-    ? htmlContent.replace('</body>', `${script}</body>`)
-    : `${htmlContent}${script}`;
+  const lower = htmlContent.toLowerCase();
+  const bodyCloseTag = "</body>";
+  const bodyCloseIndex = lower.lastIndexOf(bodyCloseTag);
+
+  if (bodyCloseIndex === -1) {
+    return `${htmlContent}${script}`;
+  }
+
+  return `${htmlContent.slice(0, bodyCloseIndex)}${script}${htmlContent.slice(bodyCloseIndex)}`;
 }
 
 export function startAnnotateServer(options: {
