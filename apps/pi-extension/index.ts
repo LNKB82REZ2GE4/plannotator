@@ -52,7 +52,7 @@ try {
 }
 
 // Tool sets by phase
-const PLANNING_TOOLS = ["read", "bash", "grep", "find", "ls", "write", "edit", "exit_plan_mode"];
+const PLANNING_TOOLS = ["read", "bash", "grep", "find", "ls", "write", "edit", "ask", "exit_plan_mode"];
 const EXECUTION_TOOLS = ["read", "bash", "edit", "write"];
 const NORMAL_TOOLS = ["read", "bash", "edit", "write"];
 
@@ -73,6 +73,7 @@ export default function plannotator(pi: ExtensionAPI): void {
   let phase: Phase = "idle";
   let planFilePath = "PLAN.md";
   let checklistItems: ChecklistItem[] = [];
+  let activeAnnotateServer: { stop: () => void } | null = null;
 
   // ── Flags ────────────────────────────────────────────────────────────
 
@@ -231,26 +232,45 @@ export default function plannotator(pi: ExtensionAPI): void {
       ctx.ui.notify(`Opening annotation UI for ${filePath}...`, "info");
 
       const markdown = readFileSync(absolutePath, "utf-8");
+
+      if (activeAnnotateServer) {
+        activeAnnotateServer.stop();
+        activeAnnotateServer = null;
+      }
+
       const server = startAnnotateServer({
         markdown,
         filePath: absolutePath,
         origin: "pi",
         htmlContent: planHtmlContent,
       });
+      activeAnnotateServer = server;
 
       openBrowser(server.url);
+      ctx.ui.notify("Annotation UI opened. Send, save, or discard in the browser.", "info");
 
-      const result = await server.waitForDecision();
-      await new Promise((r) => setTimeout(r, 1500));
-      server.stop();
+      void (async () => {
+        try {
+          const result = await server.waitForDecision();
+          await new Promise((r) => setTimeout(r, 300));
 
-      if (result.feedback) {
-        pi.sendUserMessage(
-          `# Markdown Annotations\n\nFile: ${absolutePath}\n\n${result.feedback}\n\nPlease address the annotation feedback above.`,
-        );
-      } else {
-        ctx.ui.notify("Annotation closed (no feedback).", "info");
-      }
+          if (result.disposition === "send" && result.feedback) {
+            pi.sendUserMessage(
+              `# Markdown Annotations\n\nFile: ${absolutePath}\n\n${result.feedback}\n\nPlease address the annotation feedback above.`,
+            );
+          } else if (result.disposition === "save") {
+            const pathInfo = result.savedPath ? ` (${result.savedPath})` : "";
+            ctx.ui.notify(`Annotations saved locally${pathInfo}.`, "info");
+          } else {
+            ctx.ui.notify("Annotation closed (discarded).", "info");
+          }
+        } finally {
+          server.stop();
+          if (activeAnnotateServer === server) {
+            activeAnnotateServer = null;
+          }
+        }
+      })();
     },
   });
 
@@ -444,7 +464,7 @@ export default function plannotator(pi: ExtensionAPI): void {
           content: `[PLANNOTATOR - PLANNING PHASE]
 You are in plan mode. You MUST NOT make any changes to the codebase — no edits, no commits, no installs, no destructive commands. The ONLY file you may write to or edit is the plan file: ${planFilePath}.
 
-Available tools: read, bash (read-only commands only), grep, find, ls, write (${planFilePath} only), edit (${planFilePath} only), exit_plan_mode
+Available tools: read, bash (read-only commands only), grep, find, ls, write (${planFilePath} only), edit (${planFilePath} only), ask, exit_plan_mode
 
 ## Iterative Planning Workflow
 

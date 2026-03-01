@@ -364,7 +364,7 @@ const App: React.FC = () => {
   const [annotateMode, setAnnotateMode] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submitted, setSubmitted] = useState<'approved' | 'denied' | null>(null);
+  const [submitted, setSubmitted] = useState<'approved' | 'denied' | 'saved' | 'discarded' | null>(null);
   const [pendingPasteImage, setPendingPasteImage] = useState<{ file: File; blobUrl: string; initialName: string } | null>(null);
   const [showPermissionModeSetup, setShowPermissionModeSetup] = useState(false);
   const [showUIFeaturesSetup, setShowUIFeaturesSetup] = useState(false);
@@ -375,6 +375,7 @@ const App: React.FC = () => {
   const [pasteApiUrl, setPasteApiUrl] = useState<string | undefined>(undefined);
   const [repoInfo, setRepoInfo] = useState<{ display: string; branch?: string } | null>(null);
   const [showExportDropdown, setShowExportDropdown] = useState(false);
+  const [showAnnotateCloseDropdown, setShowAnnotateCloseDropdown] = useState(false);
   const [initialExportTab, setInitialExportTab] = useState<'share' | 'annotations' | 'notes'>();
   const [noteSaveToast, setNoteSaveToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   // Plan diff state
@@ -695,6 +696,24 @@ const App: React.FC = () => {
     }
   };
 
+  const handleAnnotateClose = async (action: 'save' | 'discard') => {
+    setIsSubmitting(true);
+    try {
+      await fetch('/api/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          ...(action === 'save' ? { feedback: annotationsOutput, annotations } : {}),
+        }),
+      });
+      setSubmitted(action === 'save' ? 'saved' : 'discarded');
+      setShowAnnotateCloseDropdown(false);
+    } catch {
+      setIsSubmitting(false);
+    }
+  };
+
   // Global keyboard shortcuts (Cmd/Ctrl+Enter to submit)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -706,7 +725,7 @@ const App: React.FC = () => {
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
       // Don't intercept if any modal is open
-      if (showExport || showImport || showFeedbackPrompt || showClaudeCodeWarning ||
+      if (showExport || showImport || showAnnotateCloseDropdown || showFeedbackPrompt || showClaudeCodeWarning ||
           showAgentWarning || showPermissionModeSetup || showUIFeaturesSetup || showPlanDiffMarketing || pendingPasteImage) return;
 
       // Don't intercept if already submitted or submitting
@@ -750,7 +769,7 @@ const App: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
-    showExport, showImport, showFeedbackPrompt, showClaudeCodeWarning, showAgentWarning,
+    showExport, showImport, showAnnotateCloseDropdown, showFeedbackPrompt, showClaudeCodeWarning, showAgentWarning,
     showPermissionModeSetup, showUIFeaturesSetup, showPlanDiffMarketing, pendingPasteImage,
     submitted, isSubmitting, isApiMode, linkedDocHook.isActive, annotations.length, annotateMode,
     origin, getAgentWarning,
@@ -872,7 +891,7 @@ const App: React.FC = () => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
-      if (showExport || showFeedbackPrompt || showClaudeCodeWarning ||
+      if (showExport || showAnnotateCloseDropdown || showFeedbackPrompt || showClaudeCodeWarning ||
           showAgentWarning || showPermissionModeSetup || showUIFeaturesSetup || showPlanDiffMarketing || pendingPasteImage) return;
 
       if (submitted || !isApiMode) return;
@@ -898,23 +917,26 @@ const App: React.FC = () => {
     window.addEventListener('keydown', handleSaveShortcut);
     return () => window.removeEventListener('keydown', handleSaveShortcut);
   }, [
-    showExport, showFeedbackPrompt, showClaudeCodeWarning, showAgentWarning,
+    showExport, showAnnotateCloseDropdown, showFeedbackPrompt, showClaudeCodeWarning, showAgentWarning,
     showPermissionModeSetup, showUIFeaturesSetup, showPlanDiffMarketing, pendingPasteImage,
     submitted, isApiMode, markdown, annotationsOutput,
   ]);
 
-  // Close export dropdown on click outside
+  // Close export/annotate dropdowns on click outside
   useEffect(() => {
-    if (!showExportDropdown) return;
+    if (!showExportDropdown && !showAnnotateCloseDropdown) return;
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
       if (!target.closest('[data-export-dropdown]')) {
         setShowExportDropdown(false);
       }
+      if (!target.closest('[data-annotate-close-dropdown]')) {
+        setShowAnnotateCloseDropdown(false);
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showExportDropdown]);
+  }, [showExportDropdown, showAnnotateCloseDropdown]);
 
   const agentName = useMemo(() => {
     if (origin === 'opencode') return 'OpenCode';
@@ -986,6 +1008,43 @@ const App: React.FC = () => {
                   </svg>
                   <span className="hidden md:inline">{isSubmitting ? 'Sending...' : annotateMode ? 'Send Annotations' : 'Send Feedback'}</span>
                 </button>
+
+                {annotateMode && (
+                  <div className="relative" data-annotate-close-dropdown>
+                    <button
+                      onClick={() => setShowAnnotateCloseDropdown(prev => !prev)}
+                      disabled={isSubmitting}
+                      className={`p-1.5 md:px-2.5 md:py-1 rounded-md text-xs font-medium transition-all ${
+                        isSubmitting
+                          ? 'opacity-50 cursor-not-allowed bg-muted text-muted-foreground'
+                          : 'bg-muted text-muted-foreground hover:text-foreground hover:bg-muted/80 border border-border/50'
+                      }`}
+                      title="Close annotation session"
+                    >
+                      <span className="hidden md:inline">Close</span>
+                      <svg className="w-4 h-4 md:hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+
+                    {showAnnotateCloseDropdown && (
+                      <div className="absolute top-full right-0 mt-1 w-56 bg-popover border border-border rounded-lg shadow-xl z-50 py-1">
+                        <button
+                          onClick={() => handleAnnotateClose('save')}
+                          className="w-full text-left px-3 py-1.5 text-xs hover:bg-muted transition-colors"
+                        >
+                          Close & Save Annotations Locally
+                        </button>
+                        <button
+                          onClick={() => handleAnnotateClose('discard')}
+                          className="w-full text-left px-3 py-1.5 text-xs hover:bg-muted transition-colors text-destructive"
+                        >
+                          Close & Discard
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {!annotateMode && <div className="relative group/approve">
                   <button
@@ -1375,13 +1434,27 @@ const App: React.FC = () => {
         {/* Completion overlay - shown after approve/deny */}
         <CompletionOverlay
           submitted={submitted}
-          title={submitted === 'approved' ? 'Plan Approved' : annotateMode ? 'Annotations Sent' : 'Feedback Sent'}
+          title={
+            submitted === 'approved'
+              ? 'Plan Approved'
+              : submitted === 'saved'
+                ? 'Annotations Saved'
+                : submitted === 'discarded'
+                  ? 'Review Closed'
+                  : annotateMode
+                    ? 'Annotations Sent'
+                    : 'Feedback Sent'
+          }
           subtitle={
             submitted === 'approved'
               ? `${agentName} will proceed with the implementation.`
-              : annotateMode
-                ? `${agentName} will address your annotations on the file.`
-                : `${agentName} will revise the plan based on your annotations.`
+              : submitted === 'saved'
+                ? 'Annotations were saved locally and not sent to the agent.'
+                : submitted === 'discarded'
+                  ? 'Annotation review closed without sending feedback.'
+                  : annotateMode
+                    ? `${agentName} will address your annotations on the file.`
+                    : `${agentName} will revise the plan based on your annotations.`
           }
           agentLabel={agentName}
         />

@@ -7,10 +7,10 @@
  */
 
 import { createServer, type IncomingMessage, type Server } from "node:http";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import os from "node:os";
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join, basename } from "node:path";
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, appendFileSync } from "node:fs";
+import { join, basename, dirname, extname } from "node:path";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -54,20 +54,31 @@ export function openBrowser(url: string): void {
     const platform = process.platform;
     const wsl = platform === "linux" && os.release().toLowerCase().includes("microsoft");
 
+    const runDetached = (command: string, args: string[]) => {
+      const child = spawn(command, args, {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+    };
+
     if (browser) {
       if (process.env.PLANNOTATOR_BROWSER && platform === "darwin") {
-        execSync(`open -a ${JSON.stringify(browser)} ${JSON.stringify(url)}`, { stdio: "ignore" });
+        runDetached("open", ["-a", browser, url]);
       } else if (platform === "win32" || wsl) {
-        execSync(`cmd.exe /c start "" ${JSON.stringify(browser)} ${JSON.stringify(url)}`, { stdio: "ignore" });
+        runDetached("cmd.exe", ["/c", "start", "", browser, url]);
       } else {
-        execSync(`${JSON.stringify(browser)} ${JSON.stringify(url)}`, { stdio: "ignore" });
+        runDetached(browser, [url]);
       }
-    } else if (platform === "win32" || wsl) {
-      execSync(`cmd.exe /c start "" ${JSON.stringify(url)}`, { stdio: "ignore" });
+      return;
+    }
+
+    if (platform === "win32" || wsl) {
+      runDetached("cmd.exe", ["/c", "start", "", url]);
     } else if (platform === "darwin") {
-      execSync(`open ${JSON.stringify(url)}`, { stdio: "ignore" });
+      runDetached("open", [url]);
     } else {
-      execSync(`xdg-open ${JSON.stringify(url)}`, { stdio: "ignore" });
+      runDetached("xdg-open", [url]);
     }
   } catch {
     // Silently fail
@@ -465,11 +476,152 @@ export function startReviewServer(options: {
 
 // ── Annotate Server ─────────────────────────────────────────────────────
 
+export type AnnotateDisposition = "send" | "save" | "discard";
+
+export interface AnnotateDecision {
+  feedback: string;
+  disposition: AnnotateDisposition;
+  savedPath?: string;
+}
+
 export interface AnnotateServerResult {
   port: number;
   url: string;
-  waitForDecision: () => Promise<{ feedback: string }>;
+  waitForDecision: () => Promise<AnnotateDecision>;
   stop: () => void;
+}
+
+function saveAnnotationDraft(filePath: string, feedback: string): string {
+  const parent = dirname(filePath);
+  const ext = extname(filePath);
+  const base = basename(filePath, ext);
+  const draftPath = join(parent, `${base}.annotations.md`);
+  const timestamp = new Date().toISOString();
+  const section = `\n\n---\nSaved at: ${timestamp}\n\n${feedback}\n`;
+  appendFileSync(draftPath, section, "utf-8");
+  return draftPath;
+}
+
+function injectAnnotateCloseControls(htmlContent: string): string {
+  const script = `
+<script>
+(() => {
+  if (window.__plannotatorCloseControlsInjected) return;
+  window.__plannotatorCloseControlsInjected = true;
+
+  const originalFetch = window.fetch.bind(window);
+  let saveOnlyNextFeedback = false;
+
+  window.fetch = async (input, init) => {
+    try {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      if (saveOnlyNextFeedback && url.includes('/api/feedback')) {
+        saveOnlyNextFeedback = false;
+        let parsed = {};
+        try {
+          parsed = init && init.body ? JSON.parse(init.body) : {};
+        } catch {}
+
+        return originalFetch('/api/close', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'save',
+            feedback: parsed.feedback || '',
+            annotations: parsed.annotations || [],
+          }),
+        });
+      }
+    } catch {}
+
+    return originalFetch(input, init);
+  };
+
+  const findSendButton = () => {
+    const buttons = Array.from(document.querySelectorAll('button'));
+    return buttons.find((button) => {
+      const text = (button.textContent || '').toLowerCase();
+      return text.includes('send annotations') || text.includes('sending...');
+    }) || null;
+  };
+
+  const closeDiscard = async () => {
+    try {
+      await originalFetch('/api/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'discard' }),
+      });
+    } catch {}
+  };
+
+  const closeSave = async () => {
+    const sendButton = findSendButton();
+    if (sendButton) {
+      saveOnlyNextFeedback = true;
+      sendButton.click();
+      return;
+    }
+
+    try {
+      await originalFetch('/api/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'save', feedback: '' }),
+      });
+    } catch {}
+  };
+
+  const renderControls = () => {
+    if (document.getElementById('plannotator-close-controls')) return;
+
+    const container = document.createElement('div');
+    container.id = 'plannotator-close-controls';
+    container.style.position = 'fixed';
+    container.style.right = '12px';
+    container.style.bottom = '12px';
+    container.style.zIndex = '99999';
+    container.style.display = 'flex';
+    container.style.gap = '8px';
+
+    const discardButton = document.createElement('button');
+    discardButton.textContent = 'Close & Discard';
+    discardButton.style.padding = '6px 10px';
+    discardButton.style.borderRadius = '6px';
+    discardButton.style.border = '1px solid #555';
+    discardButton.style.background = '#222';
+    discardButton.style.color = '#ddd';
+    discardButton.style.fontSize = '12px';
+    discardButton.style.cursor = 'pointer';
+    discardButton.onclick = closeDiscard;
+
+    const saveButton = document.createElement('button');
+    saveButton.textContent = 'Close & Save Local';
+    saveButton.style.padding = '6px 10px';
+    saveButton.style.borderRadius = '6px';
+    saveButton.style.border = '1px solid #3b82f6';
+    saveButton.style.background = '#1e3a8a';
+    saveButton.style.color = '#dbeafe';
+    saveButton.style.fontSize = '12px';
+    saveButton.style.cursor = 'pointer';
+    saveButton.onclick = closeSave;
+
+    container.appendChild(discardButton);
+    container.appendChild(saveButton);
+    document.body.appendChild(container);
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', renderControls, { once: true });
+  } else {
+    renderControls();
+  }
+})();
+</script>`;
+
+  return htmlContent.includes('</body>')
+    ? htmlContent.replace('</body>', `${script}</body>`)
+    : `${htmlContent}${script}`;
 }
 
 export function startAnnotateServer(options: {
@@ -478,8 +630,14 @@ export function startAnnotateServer(options: {
   htmlContent: string;
   origin?: string;
 }): AnnotateServerResult {
-  let resolveDecision!: (result: { feedback: string }) => void;
-  const decisionPromise = new Promise<{ feedback: string }>((r) => {
+  let resolveDecision!: (result: AnnotateDecision) => void;
+  let settled = false;
+  const settleDecision = (result: AnnotateDecision) => {
+    if (settled) return;
+    settled = true;
+    resolveDecision(result);
+  };
+  const decisionPromise = new Promise<AnnotateDecision>((r) => {
     resolveDecision = r;
   });
 
@@ -495,10 +653,22 @@ export function startAnnotateServer(options: {
       });
     } else if (url.pathname === "/api/feedback" && req.method === "POST") {
       const body = await parseBody(req);
-      resolveDecision({ feedback: (body.feedback as string) || "" });
+      settleDecision({ feedback: (body.feedback as string) || "", disposition: "send" });
       json(res, { ok: true });
+    } else if (url.pathname === "/api/close" && req.method === "POST") {
+      const body = await parseBody(req);
+      const action = (body.action as string | undefined) ?? "discard";
+      if (action === "save") {
+        const feedback = (body.feedback as string) || "";
+        const savedPath = saveAnnotationDraft(options.filePath, feedback);
+        settleDecision({ feedback, disposition: "save", savedPath });
+        json(res, { ok: true, savedPath });
+      } else {
+        settleDecision({ feedback: "", disposition: "discard" });
+        json(res, { ok: true });
+      }
     } else {
-      html(res, options.htmlContent);
+      html(res, injectAnnotateCloseControls(options.htmlContent));
     }
   });
 
@@ -508,6 +678,9 @@ export function startAnnotateServer(options: {
     port,
     url: `http://localhost:${port}`,
     waitForDecision: () => decisionPromise,
-    stop: () => server.close(),
+    stop: () => {
+      server.close();
+      settleDecision({ feedback: "", disposition: "discard" });
+    },
   };
 }
