@@ -1,13 +1,13 @@
 /**
  * Sidebar Hook
  *
- * Manages the shared left sidebar state: open/close and active tab (TOC or Versions).
- * The sidebar is shared between the Table of Contents and Version Browser views.
+ * Manages the shared left sidebar state: open/close and active tab (TOC, Versions, or Vault).
+ * The sidebar is shared between the Table of Contents, Version Browser, and Vault Browser views.
  */
 
 import { useState, useCallback } from "react";
 
-export type SidebarTab = "toc" | "versions";
+export type SidebarTab = "toc" | "versions" | "vault";
 
 export interface UseSidebarReturn {
   isOpen: boolean;

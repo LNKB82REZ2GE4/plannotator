@@ -13,12 +13,17 @@ const STORAGE_KEY_ENABLED = 'plannotator-obsidian-enabled';
 const STORAGE_KEY_VAULT = 'plannotator-obsidian-vault';
 const STORAGE_KEY_FOLDER = 'plannotator-obsidian-folder';
 const STORAGE_KEY_CUSTOM_PATH = 'plannotator-obsidian-custom-path';
+const STORAGE_KEY_FILENAME_FORMAT = 'plannotator-obsidian-filename-format';
+const STORAGE_KEY_VAULT_BROWSER = 'plannotator-obsidian-vault-browser';
 
 // Sentinel value for custom path selection
 export const CUSTOM_PATH_SENTINEL = '__custom__';
 
 // Default folder name in the vault
 const DEFAULT_FOLDER = 'plannotator';
+
+// Default filename format — matches the original hardcoded behavior
+export const DEFAULT_FILENAME_FORMAT = '{title} - {Mon} {D}, {YYYY} {h}-{mm}{ampm}';
 
 /**
  * Obsidian integration settings
@@ -28,6 +33,8 @@ export interface ObsidianSettings {
   vaultPath: string;      // Selected vault path OR '__custom__' sentinel
   folder: string;
   customPath?: string;    // User-entered path when vaultPath === '__custom__'
+  filenameFormat?: string; // Custom filename format (e.g. '{YYYY}-{MM}-{DD} - {title}')
+  vaultBrowserEnabled: boolean; // Show vault file browser in sidebar
 }
 
 /**
@@ -39,6 +46,8 @@ export function getObsidianSettings(): ObsidianSettings {
     vaultPath: storage.getItem(STORAGE_KEY_VAULT) || '',
     folder: storage.getItem(STORAGE_KEY_FOLDER) || DEFAULT_FOLDER,
     customPath: storage.getItem(STORAGE_KEY_CUSTOM_PATH) || undefined,
+    filenameFormat: storage.getItem(STORAGE_KEY_FILENAME_FORMAT) || undefined,
+    vaultBrowserEnabled: storage.getItem(STORAGE_KEY_VAULT_BROWSER) === 'true',
   };
 }
 
@@ -50,6 +59,8 @@ export function saveObsidianSettings(settings: ObsidianSettings): void {
   storage.setItem(STORAGE_KEY_VAULT, settings.vaultPath);
   storage.setItem(STORAGE_KEY_FOLDER, settings.folder);
   storage.setItem(STORAGE_KEY_CUSTOM_PATH, settings.customPath || '');
+  storage.setItem(STORAGE_KEY_FILENAME_FORMAT, settings.filenameFormat || '');
+  storage.setItem(STORAGE_KEY_VAULT_BROWSER, String(settings.vaultBrowserEnabled));
 }
 
 /**
@@ -69,6 +80,15 @@ export function isObsidianConfigured(): boolean {
   const settings = getObsidianSettings();
   const effectivePath = getEffectiveVaultPath(settings);
   return settings.enabled && effectivePath.trim().length > 0;
+}
+
+/**
+ * Check if the vault browser sidebar tab should be shown
+ */
+export function isVaultBrowserEnabled(): boolean {
+  const settings = getObsidianSettings();
+  const effectivePath = getEffectiveVaultPath(settings);
+  return settings.enabled && settings.vaultBrowserEnabled && effectivePath.trim().length > 0;
 }
 
 /**

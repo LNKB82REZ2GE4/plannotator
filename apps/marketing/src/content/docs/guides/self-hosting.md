@@ -20,11 +20,11 @@ Plannotator has three components. Only the hook is required.
 
 Small plans are encoded entirely in the URL hash — the share portal reads the hash and renders the plan. No backend involved. The data remains private — it never leaves the URL.
 
-Large plans don't fit in a URL. **When a user explicitly confirms** short link creation, the compressed plan is sent to the paste service, which stores it and returns a short ID. A compressed plan goes in, a link to retrieve it comes out. The share URL becomes `share.plannotator.ai/p/aBcDeFgH` (or `your-portal.example.com/p/aBcDeFgH` if self-hosting). When someone opens that link, the portal fetches the compressed data from the paste service, decompresses it, and renders the plan.
+Large plans don't fit in a URL. **When a user explicitly confirms** short link creation, the plan is **encrypted in the browser** (AES-256-GCM) before being sent to the paste service, which stores only the ciphertext and returns a short ID. The decryption key is embedded in the URL fragment (`#key=...`) and never sent to the server — not even the paste service operator can read stored plans. When someone opens that link, the portal fetches the ciphertext, decrypts it client-side using the key from the URL, and renders the plan.
 
 **Without paste service:** Sharing still works for plans that fit in a URL. Those plans stay completely private — the data lives only in the URL hash and never touches a server. Large plans show a warning that the URL may be truncated by messaging apps.
 
-**With paste service:** Large plans get short, reliable URLs that work everywhere. Plannotator temporarily stores the compressed plan data — it auto-deletes after the configured TTL.
+**With paste service:** Large plans get short, reliable URLs that work everywhere. Data is end-to-end encrypted and auto-deletes after the configured TTL.
 
 ## 1. Install the Hook
 

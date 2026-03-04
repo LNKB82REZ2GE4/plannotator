@@ -241,7 +241,7 @@ export const ImageAnnotator: React.FC<ImageAnnotatorProps> = ({
               value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') {
+                if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
                   e.preventDefault();
                   handleAccept();
                 }

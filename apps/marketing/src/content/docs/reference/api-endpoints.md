@@ -138,7 +138,7 @@ Body:
 
 Stores compressed plan data for short URL sharing. Runs as a separate service from the plan/review/annotate servers.
 
-Default: `https://paste.plannotator.ai` (or self-hosted)
+Default: `https://plannotator-paste.plannotator.workers.dev` (or self-hosted)
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|

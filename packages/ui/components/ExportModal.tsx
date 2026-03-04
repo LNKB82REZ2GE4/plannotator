@@ -124,6 +124,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         vaultPath: effectiveVaultPath,
         folder: obsidianSettings.folder || 'plannotator',
         plan: markdown,
+        ...(obsidianSettings.filenameFormat && { filenameFormat: obsidianSettings.filenameFormat }),
       };
     }
     if (target === 'bear') {
@@ -269,7 +270,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                     </button>
                   </div>
                   <p className="text-[10px] text-muted-foreground mt-1">
-                    Short link — safe for Slack, email, and messaging apps.
+                    Encrypted short link. Your plan is end-to-end encrypted before it leaves your browser — not even the server can read it.
                   </p>
                 </div>
               ) : isGeneratingShortUrl ? (
@@ -334,13 +335,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 </div>
                 {!shortShareUrl && !isGeneratingShortUrl && !urlIsLarge && (
                   <p className="text-[10px] text-muted-foreground mt-1">
-                    This URL contains the full plan and annotations.
+                    Your plan is encoded entirely in the URL — it never touches a server.
                   </p>
                 )}
               </div>
 
               <p className="text-xs text-muted-foreground">
-                Anyone with this link can view and add to your annotations.
+                Only someone with this exact link can view your plan. Short links are end-to-end encrypted — the decryption key is in the URL and never sent to the server.
               </p>
             </div>
           ) : activeTab === 'notes' && showNotesTab ? (

@@ -13,6 +13,7 @@ export interface ObsidianConfig {
   vaultPath: string;
   folder: string;
   plan: string;
+  filenameFormat?: string; // Custom format string, e.g. '{YYYY}-{MM}-{DD} - {title}'
 }
 
 export interface BearConfig {
@@ -104,26 +105,62 @@ export function extractTitle(markdown: string): string {
   return 'Plan';
 }
 
+/** Default filename format matching original behavior */
+export const DEFAULT_FILENAME_FORMAT = '{title} - {Mon} {D}, {YYYY} {h}-{mm}{ampm}';
+
 /**
- * Generate human-readable filename: Title - Mon D, YYYY H-MMam.md
- * Example: User Authentication - Jan 2, 2026 2-30pm.md
+ * Generate filename from a format string with variable substitution.
+ *
+ * Supported variables:
+ *   {title}  - Plan title from first H1 heading
+ *   {YYYY}   - 4-digit year
+ *   {MM}     - 2-digit month (01-12)
+ *   {DD}     - 2-digit day (01-31)
+ *   {Mon}    - Abbreviated month name (Jan, Feb, ...)
+ *   {D}      - Day without leading zero
+ *   {HH}     - 2-digit hour, 24h (00-23)
+ *   {h}      - Hour without leading zero, 12h
+ *   {hh}     - 2-digit hour, 12h (01-12)
+ *   {mm}     - 2-digit minutes (00-59)
+ *   {ss}     - 2-digit seconds (00-59)
+ *   {ampm}   - am/pm
+ *
+ * Default format: '{title} - {Mon} {D}, {YYYY} {h}-{mm}{ampm}'
+ * Example output: 'User Authentication - Jan 2, 2026 2-30pm.md'
  */
-export function generateFilename(markdown: string): string {
+export function generateFilename(markdown: string, format?: string): string {
   const title = extractTitle(markdown);
   const now = new Date();
 
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const month = months[now.getMonth()];
-  const day = now.getDate();
-  const year = now.getFullYear();
 
-  let hours = now.getHours();
-  const minutes = now.getMinutes().toString().padStart(2, '0');
-  const ampm = hours >= 12 ? 'pm' : 'am';
-  hours = hours % 12 || 12;
+  const hour24 = now.getHours();
+  const hour12 = hour24 % 12 || 12;
+  const ampm = hour24 >= 12 ? 'pm' : 'am';
 
-  return `${title} - ${month} ${day}, ${year} ${hours}-${minutes}${ampm}.md`;
+  const vars: Record<string, string> = {
+    title,
+    YYYY: String(now.getFullYear()),
+    MM:   String(now.getMonth() + 1).padStart(2, '0'),
+    DD:   String(now.getDate()).padStart(2, '0'),
+    Mon:  months[now.getMonth()],
+    D:    String(now.getDate()),
+    HH:   String(hour24).padStart(2, '0'),
+    h:    String(hour12),
+    hh:   String(hour12).padStart(2, '0'),
+    mm:   String(now.getMinutes()).padStart(2, '0'),
+    ss:   String(now.getSeconds()).padStart(2, '0'),
+    ampm,
+  };
+
+  const template = format?.trim() || DEFAULT_FILENAME_FORMAT;
+  const result = template.replace(/\{(\w+)\}/g, (match, key) => vars[key] ?? match);
+
+  // Sanitize: remove characters invalid in filenames
+  const sanitized = result.replace(/[<>:"/\\|?*]/g, '').replace(/\s+/g, ' ').trim();
+
+  return sanitized.endsWith('.md') ? sanitized : `${sanitized}.md`;
 }
 
 // --- Obsidian Integration ---
@@ -208,7 +245,7 @@ export async function saveToObsidian(config: ObsidianConfig): Promise<Integratio
     mkdirSync(targetFolder, { recursive: true });
 
     // Generate filename and full path
-    const filename = generateFilename(plan);
+    const filename = generateFilename(plan, config.filenameFormat);
     const filePath = join(targetFolder, filename);
 
     // Generate content with frontmatter and backlink

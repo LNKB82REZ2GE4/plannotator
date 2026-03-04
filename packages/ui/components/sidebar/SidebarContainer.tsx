@@ -1,7 +1,7 @@
 /**
  * SidebarContainer — Shared sidebar shell
  *
- * Houses both the Table of Contents and Version Browser views.
+ * Houses the Table of Contents, Version Browser, and Vault Browser views.
  * Tab bar at top switches between them.
  */
 
@@ -9,8 +9,10 @@ import React from "react";
 import type { SidebarTab } from "../../hooks/useSidebar";
 import type { Block, Annotation } from "../../types";
 import type { VersionInfo, VersionEntry, ProjectPlan } from "../../hooks/usePlanDiff";
+import type { UseVaultBrowserReturn } from "../../hooks/useVaultBrowser";
 import { TableOfContents } from "../TableOfContents";
 import { VersionBrowser } from "./VersionBrowser";
+import { VaultBrowser } from "./VaultBrowser";
 
 interface SidebarContainerProps {
   activeTab: SidebarTab;
@@ -24,6 +26,12 @@ interface SidebarContainerProps {
   onTocNavigate: (blockId: string) => void;
   linkedDocFilepath?: string | null;
   onLinkedDocBack?: () => void;
+  // Vault Browser props
+  showVaultTab?: boolean;
+  vaultPath?: string;
+  vaultBrowser?: UseVaultBrowserReturn;
+  onVaultSelectFile?: (relativePath: string) => void;
+  onVaultFetchTree?: () => void;
   // Version Browser props
   versionInfo: VersionInfo | null;
   versions: VersionEntry[];
@@ -51,6 +59,11 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
   onTocNavigate,
   linkedDocFilepath,
   onLinkedDocBack,
+  showVaultTab,
+  vaultPath,
+  vaultBrowser,
+  onVaultSelectFile,
+  onVaultFetchTree,
   versionInfo,
   versions,
   projectPlans,
@@ -112,6 +125,28 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
           }
           label="Versions"
         />
+        {showVaultTab && (
+          <TabButton
+            active={activeTab === "vault"}
+            onClick={() => onTabChange("vault")}
+            icon={
+              <svg
+                className="w-3 h-3"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
+                />
+              </svg>
+            }
+            label="Vault"
+          />
+        )}
         <div className="flex-1" />
         <button
           onClick={onClose}
@@ -162,6 +197,19 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             fetchingVersion={fetchingVersion}
             onFetchVersions={onFetchVersions}
             onFetchProjectPlans={onFetchProjectPlans}
+          />
+        )}
+        {activeTab === "vault" && showVaultTab && vaultPath && vaultBrowser && (
+          <VaultBrowser
+            vaultPath={vaultPath}
+            tree={vaultBrowser.tree}
+            isLoading={vaultBrowser.isLoading}
+            error={vaultBrowser.error}
+            expandedFolders={vaultBrowser.expandedFolders}
+            onToggleFolder={vaultBrowser.toggleFolder}
+            onSelectFile={onVaultSelectFile ?? (() => {})}
+            activeFile={vaultBrowser.activeFile}
+            onFetchTree={onVaultFetchTree ?? (() => {})}
           />
         )}
       </div>

@@ -39,14 +39,16 @@ Interactive Plan Review for AI Coding Agents. Mark up and refine your plans usin
 
 Plannotator lets you privately share plans, annotations, and feedback with colleagues. For example, a colleague can annotate a shared plan, and you can import their feedback to send directly back to the coding agent.
 
-Plans are shared via compressed URL through a static site: **share.plannotator.ai**
+**Small plans** are encoded entirely in the URL hash — no server involved, nothing stored anywhere. The data never leaves your browser.
 
-- No backend or database; nothing is stored
-- The site's deployment is open source
-- You can self-host your own share site and point Plannotator to it via an environment variable ([see docs](https://plannotator.ai/docs/guides/sharing-and-collaboration/))
+**Large plans** use a short link service with **end-to-end encryption**. Your plan is encrypted with AES-256-GCM in your browser before it's uploaded — the server stores only ciphertext it cannot read. The decryption key lives only in the URL you share and is never sent to the server. Pastes auto-delete after 7 days.
+
+- Zero-knowledge storage — not even the service operator can read stored plans (similar to [PrivateBin](https://privatebin.info/))
+- No accounts, no tracking, no cookies on the share portal
+- Fully open source and self-hostable ([see docs](https://plannotator.ai/docs/guides/sharing-and-collaboration/))
 
 > [!NOTE]
-> [share.plannotator.ai](https://share.plannotator.ai) uses a default fallback (demo) plan that is hard-coded into the site. This isn't a leaked plan—the site has no storage layer.
+> Short links are end-to-end encrypted. A single-use AES-256-GCM key is generated in your browser via the [Web Crypto API](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/generateKey), used to encrypt the plan, and embedded in the URL fragment (`#key=...`). The key never leaves the browser — it is never sent to the paste service or any server. Only someone with the exact URL can decrypt the plan.
 
 ## Install
 

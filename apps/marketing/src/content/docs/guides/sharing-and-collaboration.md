@@ -70,10 +70,12 @@ When a plan is too large for a URL (~2KB+ compressed), messaging apps like Slack
 5. A short URL like `share.plannotator.ai/p/aBcDeFgH` is generated
 6. Both the short URL and the full hash URL are shown — the short URL is safe for messaging apps
 
-### Privacy
+### Privacy & encryption
 
+- Plans are **end-to-end encrypted** (AES-256-GCM) in your browser before upload — the paste service stores only ciphertext it cannot read
+- A single-use encryption key is generated in your browser via the [Web Crypto API](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/generateKey). The key **never leaves the browser** — it is never sent to the paste service or any server. It exists only in the URL fragment (`#key=...`), which browsers never include in HTTP requests per the HTTP specification. Not even the service operator can decrypt stored plans.
 - Plans are only uploaded when you explicitly click "Create short link" — no data leaves your machine until you confirm
-- Pastes auto-expire and are permanently deleted (hosted: a few days, self-hosted: configurable via `PASTE_TTL_DAYS`)
+- Pastes auto-expire and are permanently deleted (hosted: 7 days, self-hosted: configurable via `PASTE_TTL_DAYS`)
 - The paste service is fully open source — you can audit exactly what it does
 - Self-hosters can run their own paste service for complete control — see the [self-hosting guide](/docs/guides/self-hosting/)
 - If the paste service is unavailable, the full hash URL is always available as fallback
@@ -88,3 +90,4 @@ By default, share URLs point to `https://share.plannotator.ai`. You can self-hos
 - The share portal is a static page — it only reads the hash and renders client-side
 - No analytics, no tracking, no cookies on the share portal
 - Short URLs are opt-in — data is only uploaded when you explicitly click "Create short link" (see [Short URLs for large plans](#short-urls-for-large-plans) for details)
+- Short URLs use end-to-end encryption (AES-256-GCM) — the decryption key is embedded in the URL fragment and never sent to the server. The paste service stores only opaque ciphertext, similar to [PrivateBin](https://privatebin.info/)

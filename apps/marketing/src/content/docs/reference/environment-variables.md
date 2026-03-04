@@ -23,7 +23,7 @@ All Plannotator environment variables and their defaults.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PLANNOTATOR_PASTE_URL` | `https://paste.plannotator.ai` | Base URL of the paste service API. Set this when self-hosting the paste service. |
+| `PLANNOTATOR_PASTE_URL` | `https://plannotator-paste.plannotator.workers.dev` | Base URL of the paste service API. Set this when self-hosting the paste service. |
 
 ### Self-hosted paste service
 

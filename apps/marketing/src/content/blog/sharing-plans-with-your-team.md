@@ -108,7 +108,8 @@ The hash fragment of a URL is never sent to a server in HTTP requests — that's
 This means:
 
 - **No accounts.** No sign-ups, no OAuth, no tokens.
-- **No storage.** Nothing is persisted anywhere. Close the tab and the data exists only in the URL you copied.
+- **No storage (small plans).** Nothing is persisted anywhere. Close the tab and the data exists only in the URL you copied.
+- **End-to-end encrypted (large plans).** When a plan is too large for a URL, short links encrypt your plan with AES-256-GCM in your browser before uploading. The paste service stores only ciphertext it cannot read — the decryption key lives only in the URL you share. Pastes auto-delete after 7 days.
 - **No tracking.** The share portal has no analytics, no cookies, no telemetry.
 - **Self-hostable.** If even a static page hosted by someone else isn't acceptable, you can [self-host the portal](/docs/guides/self-hosting/) and point Plannotator at it with `PLANNOTATOR_SHARE_URL`.
 

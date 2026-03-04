@@ -131,7 +131,7 @@ export async function handleRequest(
       {
         headers: {
           ...cors,
-          "Cache-Control": "public, max-age=3600",
+          "Cache-Control": "private, no-store",
         },
       }
     );

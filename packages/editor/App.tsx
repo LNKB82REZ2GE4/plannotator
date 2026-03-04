@@ -41,6 +41,8 @@ import { deriveImageName } from '@plannotator/ui/components/AttachmentsButton';
 import { useSidebar } from '@plannotator/ui/hooks/useSidebar';
 import { usePlanDiff, type VersionInfo } from '@plannotator/ui/hooks/usePlanDiff';
 import { useLinkedDoc } from '@plannotator/ui/hooks/useLinkedDoc';
+import { useVaultBrowser } from '@plannotator/ui/hooks/useVaultBrowser';
+import { isVaultBrowserEnabled } from '@plannotator/ui/utils/obsidian';
 import { SidebarTabs } from '@plannotator/ui/components/sidebar/SidebarTabs';
 import { SidebarContainer } from '@plannotator/ui/components/sidebar/SidebarContainer';
 import { PlanDiffViewer } from '@plannotator/ui/components/plan-diff/PlanDiffViewer';
@@ -407,6 +409,25 @@ const App: React.FC = () => {
     }
   }, [uiPrefs.tocEnabled]);
 
+  // Clear diff view when switching away from versions tab
+  useEffect(() => {
+    if (sidebar.activeTab === 'toc' && isPlanDiffActive) {
+      setIsPlanDiffActive(false);
+    }
+  }, [sidebar.activeTab]);
+
+  // Clear diff view on Escape key
+  useEffect(() => {
+    if (!isPlanDiffActive) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsPlanDiffActive(false);
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isPlanDiffActive]);
+
   // Plan diff computation
   const planDiff = usePlanDiff(markdown, previousPlan, versionInfo);
 
@@ -416,6 +437,59 @@ const App: React.FC = () => {
     setMarkdown, setAnnotations, setSelectedAnnotationId, setGlobalAttachments,
     viewerRef, sidebar,
   });
+
+  // Obsidian vault browser
+  const vaultBrowser = useVaultBrowser();
+
+  const showVaultTab = useMemo(() => isVaultBrowserEnabled(), [uiPrefs]);
+  const vaultPath = useMemo(() => {
+    if (!showVaultTab) return '';
+    const settings = getObsidianSettings();
+    return getEffectiveVaultPath(settings);
+  }, [showVaultTab, uiPrefs]);
+
+  // Clear active file when vault browser is disabled
+  useEffect(() => {
+    if (!showVaultTab) vaultBrowser.setActiveFile(null);
+  }, [showVaultTab]);
+
+  // Auto-fetch vault tree when vault tab is first opened
+  useEffect(() => {
+    if (sidebar.activeTab === 'vault' && showVaultTab && vaultPath && vaultBrowser.tree.length === 0 && !vaultBrowser.isLoading) {
+      vaultBrowser.fetchTree(vaultPath);
+    }
+  }, [sidebar.activeTab, showVaultTab, vaultPath]);
+
+  const buildVaultDocUrl = React.useCallback(
+    (vp: string) => (path: string) =>
+      `/api/reference/obsidian/doc?vaultPath=${encodeURIComponent(vp)}&path=${encodeURIComponent(path)}`,
+    []
+  );
+
+  // Vault file selection: open via linked doc system with vault endpoint
+  const handleVaultFileSelect = React.useCallback((relativePath: string) => {
+    linkedDocHook.open(relativePath, buildVaultDocUrl(vaultPath));
+    vaultBrowser.setActiveFile(relativePath);
+  }, [vaultPath, linkedDocHook, vaultBrowser, buildVaultDocUrl]);
+
+  // Route linked doc opens through vault endpoint when viewing a vault file
+  const handleOpenLinkedDoc = React.useCallback((docPath: string) => {
+    if (vaultBrowser.activeFile && vaultPath) {
+      linkedDocHook.open(docPath, buildVaultDocUrl(vaultPath));
+    } else {
+      linkedDocHook.open(docPath);
+    }
+  }, [vaultBrowser.activeFile, vaultPath, linkedDocHook, buildVaultDocUrl]);
+
+  // Wrap linked doc back to also clear vault active file
+  const handleLinkedDocBack = React.useCallback(() => {
+    linkedDocHook.back();
+    vaultBrowser.setActiveFile(null);
+  }, [linkedDocHook, vaultBrowser]);
+
+  const handleVaultFetchTree = React.useCallback(() => {
+    vaultBrowser.fetchTree(vaultPath);
+  }, [vaultBrowser, vaultPath]);
 
   // Track active section for TOC highlighting
   const headingCount = useMemo(() => blocks.filter(b => b.type === 'heading').length, [blocks]);
@@ -435,6 +509,8 @@ const App: React.FC = () => {
     clearPendingSharedAnnotations,
     generateShortUrl,
     importFromShareUrl,
+    shareLoadError,
+    clearShareLoadError,
   } = useSharing(
     markdown,
     annotations,
@@ -489,7 +565,7 @@ const App: React.FC = () => {
         return res.json();
       })
       .then((data: { plan: string; origin?: 'claude-code' | 'opencode' | 'pi'; mode?: 'annotate'; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string } }) => {
-        setMarkdown(data.plan);
+        if (data.plan) setMarkdown(data.plan);
         setIsApiMode(true);
         if (data.mode === 'annotate') {
           setAnnotateMode(true);
@@ -631,6 +707,7 @@ const App: React.FC = () => {
           vaultPath: effectiveVaultPath,
           folder: obsidianSettings.folder || 'plannotator',
           plan: markdown,
+          ...(obsidianSettings.filenameFormat && { filenameFormat: obsidianSettings.filenameFormat }),
         };
       }
 
@@ -857,7 +934,12 @@ const App: React.FC = () => {
       const s = getObsidianSettings();
       const vaultPath = getEffectiveVaultPath(s);
       if (vaultPath) {
-        body.obsidian = { vaultPath, folder: s.folder || 'plannotator', plan: markdown };
+        body.obsidian = {
+          vaultPath,
+          folder: s.folder || 'plannotator',
+          plan: markdown,
+          ...(s.filenameFormat && { filenameFormat: s.filenameFormat }),
+        };
       }
     }
     if (target === 'bear') {
@@ -1231,6 +1313,7 @@ const App: React.FC = () => {
               activeTab={sidebar.activeTab}
               onToggleTab={sidebar.toggleTab}
               hasDiff={planDiff.hasPreviousVersion}
+              showVaultTab={showVaultTab}
               className="hidden lg:flex"
             />
           )}
@@ -1248,7 +1331,12 @@ const App: React.FC = () => {
                 activeSection={activeSection}
                 onTocNavigate={handleTocNavigate}
                 linkedDocFilepath={linkedDocHook.filepath}
-                onLinkedDocBack={linkedDocHook.isActive ? linkedDocHook.back : undefined}
+                onLinkedDocBack={linkedDocHook.isActive ? handleLinkedDocBack : undefined}
+                showVaultTab={showVaultTab}
+                vaultPath={vaultPath}
+                vaultBrowser={vaultBrowser}
+                onVaultSelectFile={handleVaultFileSelect}
+                onVaultFetchTree={handleVaultFetchTree}
                 versionInfo={versionInfo}
                 versions={planDiff.versions}
                 projectPlans={planDiff.projectPlans}
@@ -1311,8 +1399,9 @@ const App: React.FC = () => {
                   isPlanDiffActive={isPlanDiffActive}
                   onPlanDiffToggle={() => setIsPlanDiffActive(!isPlanDiffActive)}
                   hasPreviousVersion={!linkedDocHook.isActive && planDiff.hasPreviousVersion}
-                  onOpenLinkedDoc={linkedDocHook.open}
-                  linkedDocInfo={linkedDocHook.isActive ? { filepath: linkedDocHook.filepath!, onBack: linkedDocHook.back } : null}
+                  showDemoBadge={!isApiMode && !isLoadingShared && !isSharedSession}
+                  onOpenLinkedDoc={handleOpenLinkedDoc}
+                  linkedDocInfo={linkedDocHook.isActive ? { filepath: linkedDocHook.filepath!, onBack: handleLinkedDocBack, label: vaultBrowser.activeFile ? 'Vault File' : undefined } : null}
                 />
               )}
             </div>
@@ -1418,6 +1507,16 @@ const App: React.FC = () => {
           cancelText="Cancel"
           variant="warning"
           showCancel
+        />
+
+        {/* Shared URL load failure warning */}
+        <ConfirmDialog
+          isOpen={!!shareLoadError && !isApiMode}
+          onClose={clearShareLoadError}
+          title="Shared Plan Could Not Be Loaded"
+          message={shareLoadError}
+          subMessage="You are viewing a demo plan. This is sample content — it is not your data or anyone else's."
+          variant="warning"
         />
 
         {/* Save-to-notes toast */}

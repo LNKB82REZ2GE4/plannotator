@@ -9,14 +9,10 @@
  *   PLANNOTATOR_ORIGIN - Origin identifier ("claude-code" or "opencode")
  */
 
-import { mkdirSync } from "fs";
 import { resolve } from "path";
 import { isRemoteSession, getServerPort } from "./remote";
-import { openBrowser } from "./browser";
-import { validateImagePath, validateUploadExtension, UPLOAD_DIR } from "./image";
 import { openEditorDiff } from "./ide";
 import {
-  detectObsidianVaults,
   saveToObsidian,
   saveToBear,
   type ObsidianConfig,
@@ -37,12 +33,16 @@ import {
 } from "./storage";
 import { getRepoInfo } from "./repo";
 import { detectProjectName } from "./project";
+import { handleImage, handleUpload, handleAgents, handleServerReady, type OpencodeClient } from "./shared-handlers";
+import { handleDoc, handleObsidianVaults, handleObsidianFiles, handleObsidianDoc } from "./reference-handlers";
 
 // Re-export utilities
 export { isRemoteSession, getServerPort } from "./remote";
 export { openBrowser } from "./browser";
 export * from "./integrations";
 export * from "./storage";
+export { handleServerReady } from "./shared-handlers";
+export { type VaultNode, buildFileTree } from "./reference-handlers";
 
 // --- Types ---
 
@@ -64,11 +64,7 @@ export interface ServerOptions {
   /** Called when server starts with the URL, remote status, and port */
   onReady?: (url: string, isRemote: boolean, port: number) => void;
   /** OpenCode client for querying available agents (OpenCode only) */
-  opencodeClient?: {
-    app: {
-      agents: (options?: object) => Promise<{ data?: Array<{ name: string; description?: string; mode: string; hidden?: boolean }> }>;
-    };
-  };
+  opencodeClient?: OpencodeClient;
 }
 
 export interface ServerResult {
@@ -203,120 +199,17 @@ export async function startPlannotatorServer(
 
           // API: Serve a linked markdown document
           if (url.pathname === "/api/doc" && req.method === "GET") {
-            const requestedPath = url.searchParams.get("path");
-            if (!requestedPath) {
-              return Response.json({ error: "Missing path parameter" }, { status: 400 });
-            }
-
-            const projectRoot = process.cwd();
-
-            // Restrict to markdown files only
-            if (!/\.mdx?$/i.test(requestedPath)) {
-              return Response.json({ error: "Only .md and .mdx files are supported" }, { status: 400 });
-            }
-
-            // Path resolution: 3 strategies in order
-            let resolvedPath: string | null = null;
-
-            if (requestedPath.startsWith("/")) {
-              // 1. Absolute path
-              resolvedPath = requestedPath;
-            } else {
-              // 2. Relative to project root
-              const fromRoot = resolve(projectRoot, requestedPath);
-              if (await Bun.file(fromRoot).exists()) {
-                resolvedPath = fromRoot;
-              }
-
-              // 3. Bare filename — search entire project for unique match
-              if (!resolvedPath && !requestedPath.includes("/")) {
-                const glob = new Bun.Glob(`**/${requestedPath}`);
-                const matches: string[] = [];
-                for await (const match of glob.scan({ cwd: projectRoot, onlyFiles: true })) {
-                  if (match.includes("node_modules/") || match.includes(".git/")) continue;
-                  if (match.split("/").pop() === requestedPath) {
-                    matches.push(resolve(projectRoot, match));
-                  }
-                }
-                if (matches.length === 1) {
-                  resolvedPath = matches[0];
-                } else if (matches.length > 1) {
-                  const relativePaths = matches.map((m) => m.replace(projectRoot + "/", ""));
-                  return Response.json(
-                    { error: `Ambiguous filename '${requestedPath}': found ${matches.length} matches`, matches: relativePaths },
-                    { status: 400 }
-                  );
-                }
-              }
-            }
-
-            if (!resolvedPath) {
-              return Response.json({ error: `File not found: ${requestedPath}` }, { status: 404 });
-            }
-
-            // Security: path must stay within projectRoot
-            const normalised = resolve(resolvedPath);
-            if (!normalised.startsWith(projectRoot + "/") && normalised !== projectRoot) {
-              return Response.json({ error: "Access denied: path is outside project root" }, { status: 403 });
-            }
-
-            const file = Bun.file(normalised);
-            if (!(await file.exists())) {
-              return Response.json({ error: `File not found: ${requestedPath}` }, { status: 404 });
-            }
-
-            try {
-              const markdown = await file.text();
-              return Response.json({ markdown, filepath: normalised });
-            } catch {
-              return Response.json({ error: "Failed to read file" }, { status: 500 });
-            }
+            return handleDoc(req);
           }
 
           // API: Serve images (local paths or temp uploads)
           if (url.pathname === "/api/image") {
-            const imagePath = url.searchParams.get("path");
-            if (!imagePath) {
-              return new Response("Missing path parameter", { status: 400 });
-            }
-            const validation = validateImagePath(imagePath);
-            if (!validation.valid) {
-              return new Response(validation.error!, { status: 403 });
-            }
-            try {
-              const file = Bun.file(validation.resolved);
-              if (!(await file.exists())) {
-                return new Response("File not found", { status: 404 });
-              }
-              return new Response(file);
-            } catch {
-              return new Response("Failed to read file", { status: 500 });
-            }
+            return handleImage(req);
           }
 
           // API: Upload image -> save to temp -> return path
           if (url.pathname === "/api/upload" && req.method === "POST") {
-            try {
-              const formData = await req.formData();
-              const file = formData.get("file") as File;
-              if (!file) {
-                return new Response("No file provided", { status: 400 });
-              }
-
-              const extResult = validateUploadExtension(file.name);
-              if (!extResult.valid) {
-                return Response.json({ error: extResult.error }, { status: 400 });
-              }
-              mkdirSync(UPLOAD_DIR, { recursive: true });
-              const tempPath = `${UPLOAD_DIR}/${crypto.randomUUID()}.${extResult.ext}`;
-
-              await Bun.write(tempPath, file);
-              return Response.json({ path: tempPath, originalName: file.name });
-            } catch (err) {
-              const message =
-                err instanceof Error ? err.message : "Upload failed";
-              return Response.json({ error: message }, { status: 500 });
-            }
+            return handleUpload(req);
           }
 
           // API: Open plan diff in VS Code
@@ -346,26 +239,22 @@ export async function startPlannotatorServer(
 
           // API: Detect Obsidian vaults
           if (url.pathname === "/api/obsidian/vaults") {
-            const vaults = detectObsidianVaults();
-            return Response.json({ vaults });
+            return handleObsidianVaults();
+          }
+
+          // API: List Obsidian vault files as a tree
+          if (url.pathname === "/api/reference/obsidian/files" && req.method === "GET") {
+            return handleObsidianFiles(req);
+          }
+
+          // API: Read an Obsidian vault document
+          if (url.pathname === "/api/reference/obsidian/doc" && req.method === "GET") {
+            return handleObsidianDoc(req);
           }
 
           // API: Get available agents (OpenCode only)
           if (url.pathname === "/api/agents") {
-            if (!options.opencodeClient) {
-              return Response.json({ agents: [] });
-            }
-
-            try {
-              const result = await options.opencodeClient.app.agents({});
-              const agents = (result.data ?? [])
-                .filter((a) => a.mode === "primary" && !a.hidden)
-                .map((a) => ({ id: a.name, name: a.name, description: a.description }));
-
-              return Response.json({ agents });
-            } catch {
-              return Response.json({ agents: [], error: "Failed to fetch agents" });
-            }
+            return handleAgents(options.opencodeClient);
           }
 
           // API: Save to notes (decoupled from approve/deny)
@@ -558,17 +447,4 @@ export async function startPlannotatorServer(
     waitForDecision: () => decisionPromise,
     stop: () => server.stop(),
   };
-}
-
-/**
- * Default behavior: open browser for local sessions
- */
-export async function handleServerReady(
-  url: string,
-  isRemote: boolean,
-  _port: number
-): Promise<void> {
-  if (!isRemote) {
-    await openBrowser(url);
-  }
 }

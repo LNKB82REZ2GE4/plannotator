@@ -10,6 +10,7 @@
 
 import { Annotation, AnnotationType, type ImageAttachment } from '../types';
 import { compress, decompress } from '@plannotator/shared/compress';
+import { encrypt, decrypt } from '@plannotator/shared/crypto';
 
 // Image in shareable format: plain string (old) or [path, name] tuple (new)
 type ShareableImage = string | [string, string];
@@ -191,7 +192,7 @@ export function formatUrlSize(url: string): string {
 // Short URL support (paste-service backed)
 // ---------------------------------------------------------------------------
 
-const DEFAULT_PASTE_API = 'https://paste.plannotator.ai';
+const DEFAULT_PASTE_API = 'https://plannotator-paste.plannotator.workers.dev';
 const DEFAULT_SHARE_BASE = 'https://share.plannotator.ai';
 
 /**
@@ -208,7 +209,7 @@ export async function createShortShareUrl(
   annotations: Annotation[],
   globalAttachments?: ImageAttachment[],
   options?: {
-    /** Override the paste API base URL (default: https://paste.plannotator.ai) */
+    /** Override the paste API base URL (default: https://plannotator-paste.plannotator.workers.dev) */
     pasteApiUrl?: string;
     /** Override the share site base URL used in the returned short link */
     shareBaseUrl?: string;
@@ -226,10 +227,13 @@ export async function createShortShareUrl(
 
     const compressed = await compress(payload);
 
+    // Encrypt before uploading — server only sees ciphertext
+    const { ciphertext, key } = await encrypt(compressed);
+
     const response = await fetch(`${pasteApi}/api/paste`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data: compressed }),
+      body: JSON.stringify({ data: ciphertext }),
       signal: AbortSignal.timeout(5_000),
     });
 
@@ -239,7 +243,8 @@ export async function createShortShareUrl(
     }
 
     const result = (await response.json()) as { id: string };
-    const shortUrl = `${shareBase}/p/${result.id}`;
+    // Key in fragment — never sent to server per HTTP spec
+    const shortUrl = `${shareBase}/p/${result.id}#key=${key}`;
 
     return { shortUrl, id: result.id };
   } catch (e) {
@@ -258,7 +263,8 @@ export async function createShortShareUrl(
  */
 export async function loadFromPasteId(
   pasteId: string,
-  pasteApiUrl: string = DEFAULT_PASTE_API
+  pasteApiUrl: string = DEFAULT_PASTE_API,
+  encryptionKey?: string
 ): Promise<SharePayload | null> {
   try {
     const response = await fetch(`${pasteApiUrl}/api/paste/${pasteId}`, {
@@ -271,7 +277,15 @@ export async function loadFromPasteId(
     }
 
     const result = (await response.json()) as { data: string };
-    return await decompress(result.data);
+
+    if (encryptionKey) {
+      // Encrypted path: decrypt ciphertext, then decompress
+      const compressed = await decrypt(result.data, encryptionKey);
+      return await decompress(compressed) as SharePayload;
+    }
+
+    // Legacy unencrypted path: decompress directly
+    return await decompress(result.data) as SharePayload;
   } catch (e) {
     console.warn('[sharing] Failed to load from paste ID:', e);
     return null;

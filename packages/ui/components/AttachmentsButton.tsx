@@ -310,7 +310,7 @@ export const AttachmentsButton: React.FC<AttachmentsButtonProps> = ({
                   type="text"
                   value={manualPath}
                   onChange={(e) => setManualPath(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleManualAdd()}
+                  onKeyDown={(e) => e.key === 'Enter' && !e.nativeEvent.isComposing && handleManualAdd()}
                   placeholder="Paste path or URL..."
                   className="flex-1 px-2 py-1.5 text-xs bg-background border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
                 />

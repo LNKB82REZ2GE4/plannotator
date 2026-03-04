@@ -15,7 +15,8 @@ export function corsHeaders(
   requestOrigin: string,
   allowedOrigins: string[]
 ): Record<string, string> {
-  if (allowedOrigins.includes(requestOrigin) || allowedOrigins.includes("*")) {
+  const isLocalhost = /^https?:\/\/localhost(:\d+)?$/.test(requestOrigin);
+  if (isLocalhost || allowedOrigins.includes(requestOrigin) || allowedOrigins.includes("*")) {
     return {
       ...BASE_CORS_HEADERS,
       "Access-Control-Allow-Origin": requestOrigin,

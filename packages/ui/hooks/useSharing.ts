@@ -8,7 +8,7 @@
  * - Tracking whether current session is from a shared link
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Annotation, type ImageAttachment } from '../types';
 import {
   type SharePayload,
@@ -68,6 +68,12 @@ interface UseSharingResult {
 
   /** Import annotations from a teammate's share URL */
   importFromShareUrl: (url: string) => Promise<ImportResult>;
+
+  /** Error message when a shared URL failed to load on mount */
+  shareLoadError: string;
+
+  /** Clear the share load error */
+  clearShareLoadError: () => void;
 }
 
 
@@ -76,8 +82,8 @@ export function useSharing(
   annotations: Annotation[],
   globalAttachments: ImageAttachment[],
   setMarkdown: (m: string) => void,
-  setAnnotations: (a: Annotation[]) => void,
-  setGlobalAttachments: (g: ImageAttachment[]) => void,
+  setAnnotations: React.Dispatch<React.SetStateAction<Annotation[]>>,
+  setGlobalAttachments: React.Dispatch<React.SetStateAction<ImageAttachment[]>>,
   onSharedLoad?: () => void,
   shareBaseUrl?: string,
   pasteApiUrl?: string
@@ -91,11 +97,14 @@ export function useSharing(
   const [shortUrlError, setShortUrlError] = useState('');
   const [pendingSharedAnnotations, setPendingSharedAnnotations] = useState<Annotation[] | null>(null);
   const [sharedGlobalAttachments, setSharedGlobalAttachments] = useState<ImageAttachment[] | null>(null);
+  const [shareLoadError, setShareLoadError] = useState('');
 
   const clearPendingSharedAnnotations = useCallback(() => {
     setPendingSharedAnnotations(null);
     setSharedGlobalAttachments(null);
   }, []);
+
+  const clearShareLoadError = useCallback(() => setShareLoadError(''), []);
 
   // Load shared state from URL hash (or paste-service short URL)
   const loadFromHash = useCallback(async () => {
@@ -104,7 +113,12 @@ export function useSharing(
       const pathMatch = window.location.pathname.match(/^\/p\/([A-Za-z0-9]{6,16})$/);
       if (pathMatch) {
         const pasteId = pathMatch[1];
-        const payload = await loadFromPasteId(pasteId, pasteApiUrl);
+
+        // Extract encryption key from URL fragment: #key=<base64url>
+        const fragment = window.location.hash.slice(1);
+        const encryptionKey = fragment.startsWith('key=') ? fragment.slice(4) : undefined;
+
+        const payload = await loadFromPasteId(pasteId, pasteApiUrl, encryptionKey);
         if (payload) {
           setMarkdown(payload.p);
 
@@ -128,9 +142,13 @@ export function useSharing(
 
           return true;
         }
-        // Paste fetch failed — fall through to try the hash fragment instead.
+        // Paste fetch failed — short URL path can't fall back to hash parsing
+        // (the hash contains #key=, not plan data).
+        setShareLoadError('Failed to load shared plan — the link may be expired or incomplete.');
+        return false;
       }
 
+      const hash = window.location.hash.slice(1);
       const payload = await parseShareHash();
 
       if (payload) {
@@ -166,9 +184,15 @@ export function useSharing(
 
         return true;
       }
+
+      // Hash was present but failed to decompress (likely truncated by browser)
+      if (hash) {
+        setShareLoadError('Failed to load shared plan — the URL may have been truncated by your browser.');
+      }
       return false;
     } catch (e) {
       console.error('Failed to load from share hash:', e);
+      setShareLoadError('Failed to load shared plan — an unexpected error occurred.');
       return false;
     }
   }, [setMarkdown, setAnnotations, setGlobalAttachments, onSharedLoad, pasteApiUrl]);
@@ -254,11 +278,12 @@ export function useSharing(
     try {
       let payload: SharePayload | undefined;
 
-      // Check for short URL pattern: /p/<id>
-      const shortMatch = url.match(/\/p\/([A-Za-z0-9]{6,16})(?:\?|$)/);
+      // Check for short URL pattern: /p/<id> with optional #key=<key> fragment
+      const shortMatch = url.match(/\/p\/([A-Za-z0-9]{6,16})(?:#key=([A-Za-z0-9_-]+))?(?:\?|#|$)/);
       if (shortMatch) {
         const pasteId = shortMatch[1];
-        const loaded = await loadFromPasteId(pasteId, pasteApiUrl);
+        const encryptionKey = shortMatch[2]; // undefined if no key fragment
+        const loaded = await loadFromPasteId(pasteId, pasteApiUrl, encryptionKey);
         if (!loaded) {
           return { success: false, count: 0, planTitle: '', error: 'Failed to load from short URL — paste may have expired' };
         }
@@ -289,8 +314,9 @@ export function useSharing(
         return { success: true, count: 0, planTitle, error: 'No annotations found in share link' };
       }
 
-      // Deduplicate: skip annotations that already exist (by originalText + type + text)
-      const newAnnotations = importedAnnotations.filter(imp =>
+      // Estimate count from current closure (may be slightly stale, but
+      // the actual merge below uses the latest state via functional updater)
+      const estimatedNew = importedAnnotations.filter(imp =>
         !annotations.some(existing =>
           existing.originalText === imp.originalText &&
           existing.type === imp.type &&
@@ -298,26 +324,36 @@ export function useSharing(
         )
       );
 
-      if (newAnnotations.length > 0) {
-        // Merge: append new annotations to existing ones
-        setAnnotations([...annotations, ...newAnnotations]);
-
-        // Set as pending so they get applied to DOM highlights
-        setPendingSharedAnnotations(newAnnotations);
+      if (estimatedNew.length > 0) {
+        // Merge using functional updater to avoid stale closure
+        setAnnotations(prev => {
+          const newAnnotations = importedAnnotations.filter(imp =>
+            !prev.some(existing =>
+              existing.originalText === imp.originalText &&
+              existing.type === imp.type &&
+              existing.text === imp.text
+            )
+          );
+          if (newAnnotations.length === 0) return prev;
+          const merged = [...prev, ...newAnnotations];
+          // Set ALL annotations as pending so DOM highlights include originals
+          setPendingSharedAnnotations(merged);
+          return merged;
+        });
 
         // Handle global attachments (deduplicate by path)
         if (payload.g?.length) {
           const parsed = parseShareableImages(payload.g) ?? [];
-          const existingPaths = new Set(globalAttachments.map(g => g.path));
-          const newAttachments = parsed.filter(p => !existingPaths.has(p.path));
-          if (newAttachments.length > 0) {
-            setGlobalAttachments([...globalAttachments, ...newAttachments]);
-          }
+          setGlobalAttachments(prev => {
+            const existingPaths = new Set(prev.map(g => g.path));
+            const newAttachments = parsed.filter(p => !existingPaths.has(p.path));
+            return newAttachments.length > 0 ? [...prev, ...newAttachments] : prev;
+          });
           setSharedGlobalAttachments(parsed);
         }
       }
 
-      return { success: true, count: newAnnotations.length, planTitle };
+      return { success: true, count: estimatedNew.length, planTitle };
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : 'Failed to decompress share URL';
       return { success: false, count: 0, planTitle: '', error: errorMessage };
@@ -338,5 +374,7 @@ export function useSharing(
     refreshShareUrl,
     generateShortUrl,
     importFromShareUrl,
+    shareLoadError,
+    clearShareLoadError,
   };
 }

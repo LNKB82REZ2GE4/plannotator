@@ -45,7 +45,7 @@ export interface UseLinkedDocReturn {
   /** Whether a fetch is in progress */
   isLoading: boolean;
   /** Open a linked document by path (saves plan state, fetches doc, swaps) */
-  open: (docPath: string) => Promise<void>;
+  open: (docPath: string, buildUrl?: (path: string) => string) => Promise<void>;
   /** Return to the plan (caches doc annotations, restores plan state) */
   back: () => void;
   /** Dismiss the current error */
@@ -80,15 +80,19 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
   // Cache linked doc annotations keyed by filepath (persists across back/forth within session)
   const docCache = useRef<Map<string, CachedDocState>>(new Map());
 
+  const defaultBuildUrl = useCallback(
+    (path: string) => `/api/doc?path=${encodeURIComponent(path)}`,
+    []
+  );
+
   const open = useCallback(
-    async (docPath: string) => {
+    async (docPath: string, buildUrl?: (path: string) => string) => {
       setIsLoading(true);
       setError(null);
 
       try {
-        const res = await fetch(
-          `/api/doc?path=${encodeURIComponent(docPath)}`
-        );
+        const url = (buildUrl ?? defaultBuildUrl)(docPath);
+        const res = await fetch(url);
         const data = (await res.json()) as {
           markdown?: string;
           filepath?: string;

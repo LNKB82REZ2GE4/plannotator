@@ -257,7 +257,7 @@ export const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Escape") setStep("menu");
-              if (e.key === "Enter" && !e.shiftKey) {
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
                 if (inputValue.trim() || images.length > 0) {
                   onAnnotate(activeType!, inputValue || undefined, images.length > 0 ? images : undefined);
