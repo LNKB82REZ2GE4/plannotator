@@ -106,7 +106,7 @@ During **planning**:
 - `bash` is gated to a read-only allowlist, and `write`/`edit` are only allowed for the plan file
 
 During **executing**:
-- Full tool access: `read`, `bash`, `edit`, `write`
+- Pre-planning tool access is restored (including extension tools that were active before entering plan mode)
 - Progress tracked via `[DONE:n]` markers in agent responses
 - Plan re-read from disk each turn to stay current
 
