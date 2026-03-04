@@ -52,7 +52,20 @@ try {
 }
 
 // Tool sets by phase
-const PLANNING_TOOLS = ["read", "bash", "grep", "find", "ls", "write", "edit", "ask", "exit_plan_mode"];
+const PLANNING_TOOLS = [
+  "read",
+  "bash",
+  "grep",
+  "find",
+  "ls",
+  "write",
+  "edit",
+  "ask",
+  "web_search",
+  "fetch_content",
+  "get_search_content",
+  "exit_plan_mode",
+];
 const EXECUTION_TOOLS = ["read", "bash", "edit", "write"];
 const NORMAL_TOOLS = ["read", "bash", "edit", "write"];
 
@@ -464,7 +477,7 @@ export default function plannotator(pi: ExtensionAPI): void {
           content: `[PLANNOTATOR - PLANNING PHASE]
 You are in plan mode. You MUST NOT make any changes to the codebase — no edits, no commits, no installs, no destructive commands. The ONLY file you may write to or edit is the plan file: ${planFilePath}.
 
-Available tools: read, bash (read-only commands only), grep, find, ls, write (${planFilePath} only), edit (${planFilePath} only), ask, exit_plan_mode
+Available tools: read, bash (read-only commands only), grep, find, ls, write (${planFilePath} only), edit (${planFilePath} only), ask, web_search, fetch_content, get_search_content, exit_plan_mode
 
 ## Iterative Planning Workflow
 

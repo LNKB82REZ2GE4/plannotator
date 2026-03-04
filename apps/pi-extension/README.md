@@ -102,8 +102,8 @@ During execution, the agent marks completed steps with `[DONE:n]` markers. Progr
 The extension manages a state machine: **idle** → **planning** → **executing** → **idle**.
 
 During **planning**:
-- Tools restricted to: `read`, `bash` (read-only commands only), `grep`, `find`, `ls`, `write` (plan file only), `exit_plan_mode`
-- `edit` is disabled, bash is gated to a read-only allowlist, writes only allowed to the plan file
+- Tools restricted to: `read`, `bash` (read-only commands only), `grep`, `find`, `ls`, `write` (plan file only), `edit` (plan file only), `ask`, `web_search`, `fetch_content`, `get_search_content`, `exit_plan_mode`
+- `bash` is gated to a read-only allowlist, and `write`/`edit` are only allowed for the plan file
 
 During **executing**:
 - Full tool access: `read`, `bash`, `edit`, `write`
