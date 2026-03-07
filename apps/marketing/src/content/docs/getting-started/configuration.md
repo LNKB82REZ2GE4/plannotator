@@ -82,6 +82,26 @@ export PLANNOTATOR_BROWSER="/usr/bin/firefox"
 export PLANNOTATOR_BROWSER="/path/to/my-open-script.sh"
 ```
 
+For one-off overrides without changing your shell profile, use the `--browser` flag:
+
+```bash
+plannotator review --browser "Safari"
+plannotator annotate plan.md --browser "Firefox"
+```
+
+## Session discovery
+
+If you accidentally close a Plannotator browser tab, the server is still running — you just need the URL. The `sessions` subcommand lists active sessions and can reopen them:
+
+```bash
+plannotator sessions              # list active sessions
+plannotator sessions --open       # reopen most recent session
+plannotator sessions --open 2     # reopen a specific session
+plannotator sessions --clean      # remove stale session files
+```
+
+Sessions are tracked automatically. Stale entries from crashed processes are cleaned up on the next listing.
+
 ## Disabling sharing
 
 Set `PLANNOTATOR_SHARE=disabled` to remove all sharing UI — the Share tab, copy link action, and import review option are all hidden. Useful for teams working with sensitive plans.
