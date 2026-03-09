@@ -87,6 +87,28 @@ export const AttachmentsButton: React.FC<AttachmentsButtonProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen]);
 
+  // Paste image from clipboard when popover is open (per-annotation attachments).
+  // Uses capture phase + stopPropagation to prevent the global paste handler in
+  // App.tsx from also processing the same event.
+  useEffect(() => {
+    if (!isOpen || annotatorImage) return;
+    const handlePaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          e.preventDefault();
+          e.stopPropagation();
+          const file = item.getAsFile();
+          if (file) handleFileSelect(file);
+          return;
+        }
+      }
+    };
+    document.addEventListener('paste', handlePaste, true);
+    return () => document.removeEventListener('paste', handlePaste, true);
+  }, [isOpen, annotatorImage]);
+
   const handleFileSelect = (file: File) => {
     // Derive name before opening annotator so user sees it immediately
     const initialName = deriveImageName(file.name, images.map(i => i.name));
@@ -294,6 +316,9 @@ export const AttachmentsButton: React.FC<AttachmentsButtonProps> = ({
                     </svg>
                     <span className="text-xs text-muted-foreground">
                       Drop image or click to browse
+                    </span>
+                    <span className="text-[10px] text-muted-foreground/70">
+                      {navigator.platform?.includes('Mac') ? '⌘' : 'Ctrl'}+V to paste from clipboard
                     </span>
                   </>
                 )}

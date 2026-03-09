@@ -42,12 +42,10 @@ export async function resolveMarkdownFile(
     return { kind: "not_found", input };
   }
 
-  // 1. Absolute path — use as-is
+  // 1. Absolute path — use as-is (no project root restriction;
+  //    the user explicitly typed the full path)
   if (input.startsWith("/")) {
     const normalized = resolve(input);
-    if (!normalized.startsWith(projectRoot + "/") && normalized !== projectRoot) {
-      return { kind: "not_found", input };
-    }
     if (await Bun.file(normalized).exists()) {
       return { kind: "found", path: normalized };
     }
