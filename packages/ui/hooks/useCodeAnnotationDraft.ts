@@ -12,6 +12,7 @@ const DEBOUNCE_MS = 500;
 
 interface DraftData {
   codeAnnotations: CodeAnnotation[];
+  viewedFiles?: string[];
   ts: number;
 }
 
@@ -28,22 +29,24 @@ function formatTimeAgo(ts: number): string {
 
 interface UseCodeAnnotationDraftOptions {
   annotations: CodeAnnotation[];
+  viewedFiles: Set<string>;
   isApiMode: boolean;
   submitted: boolean;
 }
 
 interface UseCodeAnnotationDraftResult {
-  draftBanner: { count: number; timeAgo: string } | null;
-  restoreDraft: () => CodeAnnotation[];
+  draftBanner: { count: number; viewedCount: number; timeAgo: string } | null;
+  restoreDraft: () => { annotations: CodeAnnotation[]; viewedFiles: string[] };
   dismissDraft: () => void;
 }
 
 export function useCodeAnnotationDraft({
   annotations,
+  viewedFiles,
   isApiMode,
   submitted,
 }: UseCodeAnnotationDraftOptions): UseCodeAnnotationDraftResult {
-  const [draftBanner, setDraftBanner] = useState<{ count: number; timeAgo: string } | null>(null);
+  const [draftBanner, setDraftBanner] = useState<{ count: number; viewedCount: number; timeAgo: string } | null>(null);
   const draftDataRef = useRef<DraftData | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasMountedRef = useRef(false);
@@ -58,11 +61,14 @@ export function useCodeAnnotationDraft({
         return res.json();
       })
       .then((data: DraftData | null) => {
-        if (data?.codeAnnotations && Array.isArray(data.codeAnnotations) && data.codeAnnotations.length > 0) {
+        const annotationCount = Array.isArray(data?.codeAnnotations) ? data.codeAnnotations.length : 0;
+        const viewedCount = Array.isArray(data?.viewedFiles) ? data.viewedFiles.length : 0;
+        if (annotationCount > 0 || viewedCount > 0) {
           draftDataRef.current = data;
           setDraftBanner({
-            count: data.codeAnnotations.length,
-            timeAgo: formatTimeAgo(data.ts || 0),
+            count: annotationCount,
+            viewedCount,
+            timeAgo: formatTimeAgo(data?.ts || 0),
           });
         }
         hasMountedRef.current = true;
@@ -72,17 +78,18 @@ export function useCodeAnnotationDraft({
       });
   }, [isApiMode]);
 
-  // Debounced auto-save on annotation changes
+  // Debounced auto-save on annotation/viewed changes
   useEffect(() => {
     if (!isApiMode || submitted) return;
     if (!hasMountedRef.current) return;
-    if (annotations.length === 0) return;
+    if (annotations.length === 0 && viewedFiles.size === 0) return;
 
     if (timerRef.current) clearTimeout(timerRef.current);
 
     timerRef.current = setTimeout(() => {
       const payload: DraftData = {
         codeAnnotations: annotations,
+        viewedFiles: [...viewedFiles],
         ts: Date.now(),
       };
 
@@ -98,13 +105,16 @@ export function useCodeAnnotationDraft({
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [annotations, isApiMode, submitted]);
+  }, [annotations, viewedFiles, isApiMode, submitted]);
 
   const restoreDraft = useCallback(() => {
     const data = draftDataRef.current;
     setDraftBanner(null);
     draftDataRef.current = null;
-    return data?.codeAnnotations ?? [];
+    return {
+      annotations: data?.codeAnnotations ?? [],
+      viewedFiles: data?.viewedFiles ?? [],
+    };
   }, []);
 
   const dismissDraft = useCallback(() => {

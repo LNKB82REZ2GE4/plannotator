@@ -116,13 +116,15 @@ const ReviewApp: React.FC = () => {
   // Auto-save code annotation drafts
   const { draftBanner, restoreDraft, dismissDraft } = useCodeAnnotationDraft({
     annotations,
+    viewedFiles,
     isApiMode: !!origin,
     submitted: !!submitted,
   });
 
   const handleRestoreDraft = useCallback(() => {
     const restored = restoreDraft();
-    if (restored.length > 0) setAnnotations(restored);
+    if (restored.annotations.length > 0) setAnnotations(restored.annotations);
+    if (restored.viewedFiles.length > 0) setViewedFiles(new Set(restored.viewedFiles));
   }, [restoreDraft]);
 
   // VS Code editor annotations (only polls when inside VS Code webview)
@@ -828,7 +830,12 @@ const ReviewApp: React.FC = () => {
               onClose={dismissDraft}
               onConfirm={handleRestoreDraft}
               title="Draft Recovered"
-              message={draftBanner ? `Found ${draftBanner.count} annotation${draftBanner.count !== 1 ? 's' : ''} from ${draftBanner.timeAgo}. Would you like to restore them?` : ''}
+              message={draftBanner ? (() => {
+                const parts: string[] = [];
+                if (draftBanner.count > 0) parts.push(`${draftBanner.count} annotation${draftBanner.count !== 1 ? 's' : ''}`);
+                if (draftBanner.viewedCount > 0) parts.push(`${draftBanner.viewedCount} viewed file${draftBanner.viewedCount !== 1 ? 's' : ''}`);
+                return `Found ${parts.join(' and ')} from ${draftBanner.timeAgo}. Would you like to restore them?`;
+              })() : ''}
               confirmText="Restore"
               cancelText="Dismiss"
               showCancel
