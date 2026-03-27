@@ -1,5 +1,5 @@
 ---
-description: Open interactive annotation UI for a markdown file
+description: Open interactive annotation UI for a markdown file or folder
 allowed-tools: Bash(plannotator:*)
 ---
 
@@ -9,4 +9,4 @@ allowed-tools: Bash(plannotator:*)
 
 ## Your task
 
-Address the annotation feedback above. The user has reviewed the markdown file and provided specific annotations and comments.
+Address the annotation feedback above. The user has reviewed the markdown file(s) and provided specific annotations and comments.

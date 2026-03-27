@@ -6,7 +6,9 @@ export enum AnnotationType {
   GLOBAL_COMMENT = 'GLOBAL_COMMENT',
 }
 
-export type EditorMode = 'selection' | 'comment' | 'redline';
+export type EditorMode = 'selection' | 'comment' | 'redline' | 'quickLabel';
+
+export type InputMethod = 'drag' | 'pinpoint';
 
 export interface ImageAttachment {
   path: string;
@@ -24,6 +26,9 @@ export interface Annotation {
   createdA: number;
   author?: string; // Tater identity for collaborative sharing
   images?: ImageAttachment[]; // Attached images with human-readable names
+  isQuickLabel?: boolean; // true if created via quick label chip
+  quickLabelTip?: string; // optional instruction tip from the label definition
+  diffContext?: 'added' | 'removed' | 'modified'; // set when annotation created in plan diff view
   // web-highlighter metadata for cross-element selections
   startMeta?: {
     parentTagName: string;
@@ -56,10 +61,12 @@ export interface DiffResult {
 
 // Code Review Types
 export type CodeAnnotationType = 'comment' | 'suggestion' | 'concern';
+export type CodeAnnotationScope = 'line' | 'file';
 
 export interface CodeAnnotation {
   id: string;
   type: CodeAnnotationType;
+  scope?: CodeAnnotationScope; // Defaults to 'line' for backward compatibility
   filePath: string;
   lineStart: number;
   lineEnd: number;
@@ -79,6 +86,12 @@ export interface DiffAnnotationMetadata {
   suggestedCode?: string;
   originalCode?: string;
   author?: string;
+  // AI marker fields (set when kind === 'ai-marker')
+  kind?: 'annotation' | 'ai-marker';
+  questionId?: string;
+  promptPreview?: string;
+  hasResponse?: boolean;
+  isStreaming?: boolean;
 }
 
 export interface SelectedLineRange {
@@ -88,9 +101,36 @@ export interface SelectedLineRange {
   endSide?: 'deletions' | 'additions';
 }
 
+// ---------------------------------------------------------------------------
+// AI Chat (inline AI on diffs)
+// ---------------------------------------------------------------------------
+
+export interface AIQuestion {
+  id: string;
+  prompt: string;
+  /** undefined = general question (no file scope) */
+  filePath?: string;
+  /** undefined + filePath present = file-scoped; with filePath = line-scoped */
+  lineStart?: number;
+  lineEnd?: number;
+  side?: 'old' | 'new';
+  selectedCode?: string;
+  createdAt: number;
+}
+
+export interface AIResponse {
+  questionId: string;
+  text: string;
+  isStreaming: boolean;
+  error?: string;
+  createdAt: number;
+}
+
 export interface VaultNode {
   name: string;
   path: string; // relative path within vault
   type: "file" | "folder";
   children?: VaultNode[];
 }
+
+export type { EditorAnnotation } from '@plannotator/shared/types';

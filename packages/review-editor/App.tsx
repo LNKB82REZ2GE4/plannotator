@@ -6,42 +6,44 @@ import { Settings } from '@plannotator/ui/components/Settings';
 import { UpdateBanner } from '@plannotator/ui/components/UpdateBanner';
 import { storage } from '@plannotator/ui/utils/storage';
 import { CompletionOverlay } from '@plannotator/ui/components/CompletionOverlay';
-import { getIdentity } from '@plannotator/ui/utils/identity';
+import { GitHubIcon } from '@plannotator/ui/components/GitHubIcon';
+import { GitLabIcon } from '@plannotator/ui/components/GitLabIcon';
+import { RepoIcon } from '@plannotator/ui/components/RepoIcon';
+import { PullRequestIcon } from '@plannotator/ui/components/PullRequestIcon';
+import { getPlatformLabel, getMRLabel, getMRNumberLabel, getDisplayRepo } from '@plannotator/shared/pr-provider';
+import { configStore, useConfigValue } from '@plannotator/ui/config';
 import { getAgentSwitchSettings, getEffectiveAgentName } from '@plannotator/ui/utils/agentSwitch';
+import { getAIProviderSettings, saveAIProviderSettings, getPreferredModel } from '@plannotator/ui/utils/aiProvider';
+import { AISetupDialog } from '@plannotator/ui/components/AISetupDialog';
+import { needsAISetup } from '@plannotator/ui/utils/aiSetup';
 import { CodeAnnotation, CodeAnnotationType, SelectedLineRange } from '@plannotator/ui/types';
 import { useResizablePanel } from '@plannotator/ui/hooks/useResizablePanel';
+import { useCodeAnnotationDraft } from '@plannotator/ui/hooks/useCodeAnnotationDraft';
+import { useGitAdd } from './hooks/useGitAdd';
+import { generateId } from './utils/generateId';
+import { useAIChat } from './hooks/useAIChat';
+import { extractLinesFromPatch } from './utils/patchParser';
+import { isTypingTarget, useReviewSearch } from './hooks/useReviewSearch';
+import { useEditorAnnotations } from '@plannotator/ui/hooks/useEditorAnnotations';
+import { exportEditorAnnotations } from '@plannotator/ui/utils/parser';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { DiffViewer } from './components/DiffViewer';
 import { ReviewPanel } from './components/ReviewPanel';
 import { FileTree } from './components/FileTree';
 import { DEMO_DIFF } from './demoData';
+import { exportReviewFeedback } from './utils/exportFeedback';
+import type { DiffFile } from './types';
+import type { DiffOption, WorktreeInfo, GitContext } from '@plannotator/shared/types';
+import type { PRMetadata } from '@plannotator/shared/pr-provider';
+import { altKey } from '@plannotator/ui/utils/platform';
 
 declare const __APP_VERSION__: string;
-
-interface DiffFile {
-  path: string;
-  oldPath?: string;
-  patch: string;
-  additions: number;
-  deletions: number;
-}
-
-interface DiffOption {
-  id: string;
-  label: string;
-}
-
-interface GitContext {
-  currentBranch: string;
-  defaultBranch: string;
-  diffOptions: DiffOption[];
-}
 
 interface DiffData {
   files: DiffFile[];
   rawPatch: string;
   gitRef: string;
-  origin?: 'opencode' | 'claude-code';
+  origin?: 'opencode' | 'claude-code' | 'pi';
   diffType?: string;
   gitContext?: GitContext;
   sharingEnabled?: boolean;
@@ -80,54 +82,6 @@ function parseDiffToFiles(rawPatch: string): DiffFile[] {
   return files;
 }
 
-// Generate unique ID
-function generateId(): string {
-  return Math.random().toString(36).substring(2, 9);
-}
-
-// Export annotations as markdown feedback
-function exportReviewFeedback(annotations: CodeAnnotation[], files: DiffFile[]): string {
-  if (annotations.length === 0) {
-    return '# Code Review\n\nNo feedback provided.';
-  }
-
-  const grouped = new Map<string, CodeAnnotation[]>();
-  for (const ann of annotations) {
-    const existing = grouped.get(ann.filePath) || [];
-    existing.push(ann);
-    grouped.set(ann.filePath, existing);
-  }
-
-  let output = '# Code Review Feedback\n\n';
-
-  for (const [filePath, fileAnnotations] of grouped) {
-    output += `## ${filePath}\n\n`;
-
-    const sorted = [...fileAnnotations].sort((a, b) => a.lineStart - b.lineStart);
-
-    for (let i = 0; i < sorted.length; i++) {
-      const ann = sorted[i];
-      const lineRange = ann.lineStart === ann.lineEnd
-        ? `Line ${ann.lineStart}`
-        : `Lines ${ann.lineStart}-${ann.lineEnd}`;
-
-      output += `### ${lineRange} (${ann.side})\n`;
-
-      if (ann.text) {
-        output += `${ann.text}\n`;
-      }
-
-      if (ann.suggestedCode) {
-        output += `\n**Suggested code:**\n\`\`\`\n${ann.suggestedCode}\n\`\`\`\n`;
-      }
-
-      output += '\n';
-    }
-  }
-
-  return output;
-}
-
 const ReviewApp: React.FC = () => {
   const [diffData, setDiffData] = useState<DiffData | null>(null);
   const [files, setFiles] = useState<DiffFile[]>([]);
@@ -145,7 +99,9 @@ const ReviewApp: React.FC = () => {
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
   const [viewedFiles, setViewedFiles] = useState<Set<string>>(new Set());
   const [hideViewedFiles, setHideViewedFiles] = useState(false);
-  const [origin, setOrigin] = useState<'opencode' | 'claude-code' | null>(null);
+  const [origin, setOrigin] = useState<'opencode' | 'claude-code' | 'pi' | null>(null);
+  const [gitUser, setGitUser] = useState<string | undefined>();
+  const [isWSL, setIsWSL] = useState(false);
   const [diffType, setDiffType] = useState<string>('uncommitted');
   const [gitContext, setGitContext] = useState<GitContext | null>(null);
   const [isLoadingDiff, setIsLoadingDiff] = useState(false);
@@ -157,7 +113,209 @@ const ReviewApp: React.FC = () => {
   const [sharingEnabled, setSharingEnabled] = useState(true);
   const [repoInfo, setRepoInfo] = useState<{ display: string; branch?: string } | null>(null);
 
-  const identity = useMemo(() => getIdentity(), []);
+  useEffect(() => {
+    document.title = repoInfo ? `${repoInfo.display} · Code Review` : "Code Review";
+  }, [repoInfo]);
+
+  const [prMetadata, setPrMetadata] = useState<PRMetadata | null>(null);
+  const [reviewDestination, setReviewDestination] = useState<'agent' | 'platform'>(() => {
+    const stored = storage.getItem('plannotator-review-dest');
+    return stored === 'agent' ? 'agent' : 'platform'; // 'github' (legacy) → 'platform'
+  });
+  const [showDestinationMenu, setShowDestinationMenu] = useState(false);
+  const [isPlatformActioning, setIsPlatformActioning] = useState(false);
+  const [platformActionError, setPlatformActionError] = useState<string | null>(null);
+  const [platformUser, setPlatformUser] = useState<string | null>(null);
+  const [platformCommentDialog, setPlatformCommentDialog] = useState<{ action: 'approve' | 'comment' } | null>(null);
+  const [platformGeneralComment, setPlatformGeneralComment] = useState('');
+  const [platformOpenPR, setPlatformOpenPR] = useState(() => storage.getItem('plannotator-github-open-pr') !== 'false');
+
+  // Derived: Platform mode is active when destination is platform AND we have PR/MR metadata
+  const platformMode = reviewDestination === 'platform' && !!prMetadata;
+
+  // Platform-aware labels
+  const platformLabel = prMetadata ? getPlatformLabel(prMetadata) : 'GitHub';
+  const mrLabel = prMetadata ? getMRLabel(prMetadata) : 'PR';
+  const mrNumberLabel = prMetadata ? getMRNumberLabel(prMetadata) : '';
+  const displayRepo = prMetadata ? getDisplayRepo(prMetadata) : '';
+
+  const identity = useConfigValue('displayName');
+
+  const clearPendingSelection = useCallback(() => {
+    setPendingSelection(null);
+  }, []);
+
+  const {
+    searchQuery,
+    debouncedSearchQuery,
+    isSearchPending,
+    isSearchOpen,
+    activeSearchMatchId,
+    activeSearchMatch,
+    activeFileSearchMatches,
+    searchMatches,
+    searchGroups,
+    searchInputRef,
+    openSearch,
+    closeSearch,
+    clearSearch,
+    stepSearchMatch,
+    handleSearchInputChange,
+    handleSelectSearchMatch,
+  } = useReviewSearch({
+    files,
+    activeFileIndex,
+    setActiveFileIndex,
+    clearPendingSelection,
+  });
+
+  // Auto-save code annotation drafts
+  const { draftBanner, restoreDraft, dismissDraft } = useCodeAnnotationDraft({
+    annotations,
+    viewedFiles,
+    isApiMode: !!origin,
+    submitted: !!submitted,
+  });
+
+  const handleRestoreDraft = useCallback(() => {
+    const restored = restoreDraft();
+    if (restored.annotations.length > 0) setAnnotations(restored.annotations);
+    if (restored.viewedFiles.length > 0) setViewedFiles(new Set(restored.viewedFiles));
+  }, [restoreDraft]);
+
+  // VS Code editor annotations (only polls when inside VS Code webview)
+  const { editorAnnotations, deleteEditorAnnotation } = useEditorAnnotations();
+
+  // AI Chat
+  const [aiAvailable, setAiAvailable] = useState(false);
+  const [aiProviders, setAiProviders] = useState<Array<{ id: string; name: string; capabilities: Record<string, boolean>; models?: Array<{ id: string; label: string; default?: boolean }> }>>([]);
+  const [aiConfig, setAiConfig] = useState(() => {
+    const saved = getAIProviderSettings();
+    const pid = saved.providerId;
+    return {
+      providerId: pid,
+      model: pid ? (saved.preferredModels[pid] ?? null) : null,
+      reasoningEffort: null as string | null,
+    };
+  });
+  const [showAISetup, setShowAISetup] = useState(false);
+  const [reviewPanelTabOverride, setReviewPanelTabOverride] = useState<'ai' | undefined>(undefined);
+  const aiChat = useAIChat({
+    patch: diffData?.rawPatch ?? '',
+    providerId: aiConfig.providerId,
+    model: aiConfig.model,
+    reasoningEffort: aiConfig.reasoningEffort,
+  });
+
+  // Check AI capabilities on mount
+  useEffect(() => {
+    fetch('/api/ai/capabilities')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.available) {
+          setAiAvailable(true);
+          const providers = data.providers ?? [];
+          setAiProviders(providers);
+          if (providers.length > 0 && needsAISetup()) {
+            setShowAISetup(true);
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleAIConfigChange = useCallback((config: { providerId?: string | null; model?: string | null }) => {
+    setAiConfig(prev => {
+      const next = { ...prev, ...config };
+      // If provider changed, load that provider's preferred model
+      if (config.providerId !== undefined && config.providerId !== prev.providerId) {
+        next.model = config.providerId ? getPreferredModel(config.providerId) : null;
+      }
+      // Persist provider selection
+      const saved = getAIProviderSettings();
+      saveAIProviderSettings({ ...saved, providerId: next.providerId });
+      return next;
+    });
+    aiChat.resetSession();
+  }, [aiChat]);
+
+  const handleAskAI = useCallback((question: string) => {
+    if (!pendingSelection || !files[activeFileIndex]) return;
+    const lineStart = Math.min(pendingSelection.start, pendingSelection.end);
+    const lineEnd = Math.max(pendingSelection.start, pendingSelection.end);
+    const side = pendingSelection.side === 'additions' ? 'new' : 'old';
+    const selectedCode = extractLinesFromPatch(files[activeFileIndex].patch, lineStart, lineEnd, side);
+
+    aiChat.ask({
+      prompt: question,
+      filePath: files[activeFileIndex].path,
+      lineStart,
+      lineEnd,
+      side,
+      selectedCode: selectedCode || undefined,
+    });
+  }, [pendingSelection, files, activeFileIndex, aiChat]);
+
+  const handleViewAIResponse = useCallback((questionId?: string) => {
+    setReviewPanelTabOverride('ai');
+    setIsPanelOpen(true);
+    if (questionId) {
+      setScrollToQuestionId(questionId);
+      setTimeout(() => setScrollToQuestionId(null), 500);
+    }
+  }, []);
+
+  const handleScrollToAILines = useCallback((filePath: string, lineStart: number, lineEnd: number, side: 'old' | 'new') => {
+    // Switch to the file containing the referenced lines
+    const fileIndex = files.findIndex(f => f.path === filePath);
+    if (fileIndex !== -1 && fileIndex !== activeFileIndex) {
+      setPendingSelection(null);
+      setActiveFileIndex(fileIndex);
+    }
+    // Set a selection to highlight the lines
+    setPendingSelection({
+      start: lineStart,
+      end: lineEnd,
+      side: side === 'new' ? 'additions' : 'deletions',
+    });
+  }, [files, activeFileIndex]);
+
+  // AI messages for the current file (for inline markers)
+  const aiMessagesForCurrentFile = useMemo(() => {
+    const activeFile = files[activeFileIndex];
+    if (!activeFile) return [];
+    return aiChat.messages.filter(m => m.question.filePath === activeFile.path);
+  }, [aiChat.messages, files, activeFileIndex]);
+
+  // AI messages overlapping the current selection (for toolbar history)
+  const aiHistoryForSelection = useMemo(() => {
+    if (!pendingSelection || !files[activeFileIndex]) return [];
+    const filePath = files[activeFileIndex].path;
+    const selStart = Math.min(pendingSelection.start, pendingSelection.end);
+    const selEnd = Math.max(pendingSelection.start, pendingSelection.end);
+    const side = pendingSelection.side === 'additions' ? 'new' : 'old';
+    return aiChat.messages.filter(m => {
+      const q = m.question;
+      return q.filePath === filePath && q.side === side &&
+        q.lineStart != null && q.lineEnd != null &&
+        q.lineStart <= selEnd && q.lineEnd >= selStart;
+    });
+  }, [pendingSelection, files, activeFileIndex, aiChat.messages]);
+
+  // Click AI marker in diff → scroll sidebar to that Q&A
+  const [scrollToQuestionId, setScrollToQuestionId] = useState<string | null>(null);
+  const handleClickAIMarker = useCallback((questionId: string) => {
+    setScrollToQuestionId(questionId);
+    setReviewPanelTabOverride('ai');
+    setIsPanelOpen(true);
+    // Clear after a tick so it can re-trigger for the same question
+    setTimeout(() => setScrollToQuestionId(null), 500);
+  }, []);
+
+  // General AI question from sidebar input
+  const handleAskGeneral = useCallback((question: string) => {
+    aiChat.ask({ prompt: question });
+  }, [aiChat.ask]);
 
   // Resizable panels
   const panelResize = useResizablePanel({ storageKey: 'plannotator-review-panel-width' });
@@ -170,10 +328,30 @@ const ReviewApp: React.FC = () => {
   // Global keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Escape closes modals
+      // Cmd/Ctrl+F to focus search (only when sidebar is rendered)
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f' && !isTypingTarget(e.target)) {
+        if (files.length > 1 || gitContext?.diffOptions) {
+          e.preventDefault();
+          openSearch();
+        }
+        return;
+      }
+
+      // Enter/F3 to step through search matches
+      if ((e.key === 'Enter' || e.key === 'F3') && searchMatches.length > 0 && !isSearchPending && !isTypingTarget(e.target)) {
+        e.preventDefault();
+        stepSearchMatch(e.shiftKey ? -1 : 1);
+        return;
+      }
+
+      // Escape closes modals or clears search
       if (e.key === 'Escape') {
-        if (showExportModal) {
+        if (showDestinationMenu) {
+          setShowDestinationMenu(false);
+        } else if (showExportModal) {
           setShowExportModal(false);
+        } else if (searchQuery) {
+          clearSearch();
         }
       }
       // Cmd/Ctrl+Shift+C to copy diff
@@ -186,7 +364,7 @@ const ReviewApp: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showExportModal]);
+  }, [showExportModal, showDestinationMenu, searchQuery, searchMatches, isSearchPending, openSearch, stepSearchMatch, clearSearch, files, gitContext?.diffOptions]);
 
   // Get annotations for active file
   const activeFileAnnotations = useMemo(() => {
@@ -205,13 +383,22 @@ const ReviewApp: React.FC = () => {
       .then((data: {
         rawPatch: string;
         gitRef: string;
-        origin?: 'opencode' | 'claude-code';
+        origin?: 'opencode' | 'claude-code' | 'pi';
         diffType?: string;
         gitContext?: GitContext;
         sharingEnabled?: boolean;
         repoInfo?: { display: string; branch?: string };
+        prMetadata?: PRMetadata;
+        platformUser?: string;
+        viewedFiles?: string[];
         error?: string;
+        isWSL?: boolean;
+        serverConfig?: { displayName?: string; gitUser?: string };
       }) => {
+        // Initialize config store with server-provided values (config file > cookie > default)
+        configStore.init(data.serverConfig);
+        // gitUser drives the "Use git name" button in Settings; stays undefined (button hidden) when unavailable
+        setGitUser(data.serverConfig?.gitUser);
         const apiFiles = parseDiffToFiles(data.rawPatch);
         setDiffData({
           files: apiFiles,
@@ -228,7 +415,14 @@ const ReviewApp: React.FC = () => {
         if (data.gitContext) setGitContext(data.gitContext);
         if (data.sharingEnabled !== undefined) setSharingEnabled(data.sharingEnabled);
         if (data.repoInfo) setRepoInfo(data.repoInfo);
+        if (data.prMetadata) setPrMetadata(data.prMetadata);
+        if (data.platformUser) setPlatformUser(data.platformUser);
+        // Initialize viewed files from GitHub's state (set before draft restore so draft takes precedence)
+        if (data.viewedFiles && data.viewedFiles.length > 0) {
+          setViewedFiles(new Set(data.viewedFiles));
+        }
         if (data.error) setDiffError(data.error);
+        if (data.isWSL) setIsWSL(true);
       })
       .catch(() => {
         // Not in API mode - use demo content
@@ -270,6 +464,7 @@ const ReviewApp: React.FC = () => {
     const newAnnotation: CodeAnnotation = {
       id: generateId(),
       type,
+      scope: 'line',
       filePath: files[activeFileIndex].path,
       lineStart,
       lineEnd,
@@ -284,6 +479,27 @@ const ReviewApp: React.FC = () => {
     setAnnotations(prev => [...prev, newAnnotation]);
     setPendingSelection(null);
   }, [pendingSelection, files, activeFileIndex, identity]);
+
+  const handleAddFileComment = useCallback((text: string) => {
+    const activeFile = files[activeFileIndex];
+    const trimmed = text.trim();
+    if (!activeFile || !trimmed) return;
+
+    const newAnnotation: CodeAnnotation = {
+      id: generateId(),
+      type: 'comment',
+      scope: 'file',
+      filePath: activeFile.path,
+      lineStart: 1,
+      lineEnd: 1,
+      side: 'new',
+      text: trimmed,
+      createdAt: Date.now(),
+      author: identity,
+    };
+
+    setAnnotations(prev => [...prev, newAnnotation]);
+  }, [files, activeFileIndex, identity]);
 
   // Edit annotation
   const handleEditAnnotation = useCallback((
@@ -328,25 +544,61 @@ const ReviewApp: React.FC = () => {
   const handleToggleViewed = useCallback((filePath: string) => {
     setViewedFiles(prev => {
       const next = new Set(prev);
-      if (next.has(filePath)) {
-        next.delete(filePath);
-      } else {
+      const willBeViewed = !prev.has(filePath);
+      if (willBeViewed) {
         next.add(filePath);
+      } else {
+        next.delete(filePath);
+      }
+      // Sync viewed state to GitHub (fire and forget — best effort)
+      // Capture willBeViewed inside the callback to ensure correctness with React batching
+      if (prMetadata && prMetadata.platform === 'github') {
+        fetch('/api/pr-viewed', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filePaths: [filePath], viewed: willBeViewed }),
+        }).catch(() => {
+          // Silently ignore — viewed sync is best-effort
+        });
       }
       return next;
     });
-  }, []);
+  }, [prMetadata]);
 
-  // Switch diff type (uncommitted, staged, last-commit, branch, etc.)
-  const handleDiffSwitch = useCallback(async (newDiffType: string) => {
-    if (newDiffType === diffType || newDiffType === 'separator') return;
+  // Derive worktree path and base diff type from the composite diffType string
+  const { activeWorktreePath, activeDiffBase } = useMemo(() => {
+    if (diffType.startsWith('worktree:')) {
+      const rest = diffType.slice('worktree:'.length);
+      const lastColon = rest.lastIndexOf(':');
+      if (lastColon !== -1) {
+        const sub = rest.slice(lastColon + 1);
+        if (['uncommitted', 'staged', 'unstaged', 'last-commit', 'branch'].includes(sub)) {
+          return { activeWorktreePath: rest.slice(0, lastColon), activeDiffBase: sub };
+        }
+      }
+      return { activeWorktreePath: rest, activeDiffBase: 'uncommitted' };
+    }
+    return { activeWorktreePath: null, activeDiffBase: diffType };
+  }, [diffType]);
 
+  // Git add/staging logic
+  const handleFileViewedFromStage = useCallback(
+    (path: string) => setViewedFiles(prev => new Set(prev).add(path)),
+    [],
+  );
+  const { stagedFiles, stagingFile, canStageFiles, stageFile, resetStagedFiles, stageError } = useGitAdd({
+    activeDiffBase,
+    onFileViewed: handleFileViewedFromStage,
+  });
+
+  // Shared helper: fetch a diff switch and update state
+  const fetchDiffSwitch = useCallback(async (fullDiffType: string) => {
     setIsLoadingDiff(true);
     try {
       const res = await fetch('/api/diff/switch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ diffType: newDiffType }),
+        body: JSON.stringify({ diffType: fullDiffType }),
       });
 
       if (!res.ok) throw new Error('Failed to switch diff');
@@ -355,23 +607,40 @@ const ReviewApp: React.FC = () => {
         rawPatch: string;
         gitRef: string;
         diffType: string;
+        error?: string;
       };
 
-      const newFiles = parseDiffToFiles(data.rawPatch);
-      setFiles(newFiles);
+      setFiles(parseDiffToFiles(data.rawPatch));
       setDiffType(data.diffType);
       setActiveFileIndex(0);
       setPendingSelection(null);
-      setDiffError((data as { error?: string }).error || null);
-      // Note: We keep existing annotations - they may still be relevant
-      // or user can clear them manually
+      setDiffError(data.error || null);
+      resetStagedFiles();
     } catch (err) {
       console.error('Failed to switch diff:', err);
       setDiffError(err instanceof Error ? err.message : 'Failed to switch diff');
     } finally {
       setIsLoadingDiff(false);
     }
-  }, [diffType]);
+  }, [resetStagedFiles]);
+
+  // Switch diff type (uncommitted, last-commit, branch) — composes worktree prefix if active
+  const handleDiffSwitch = useCallback(async (baseDiffType: string) => {
+    const fullDiffType = activeWorktreePath
+      ? `worktree:${activeWorktreePath}:${baseDiffType}`
+      : baseDiffType;
+    if (fullDiffType === diffType) return;
+    await fetchDiffSwitch(fullDiffType);
+  }, [diffType, activeWorktreePath, fetchDiffSwitch]);
+
+  // Switch worktree context (or back to main repo)
+  const handleWorktreeSwitch = useCallback(async (worktreePath: string | null) => {
+    if (worktreePath === activeWorktreePath) return;
+    const fullDiffType = worktreePath
+      ? `worktree:${worktreePath}:uncommitted`
+      : 'uncommitted';
+    await fetchDiffSwitch(fullDiffType);
+  }, [activeWorktreePath, fetchDiffSwitch]);
 
   // Select annotation - switches file if needed and scrolls to it
   const handleSelectAnnotation = useCallback((id: string | null) => {
@@ -417,7 +686,7 @@ const ReviewApp: React.FC = () => {
       return;
     }
     try {
-      const feedback = exportReviewFeedback(annotations, files);
+      const feedback = exportReviewFeedback(annotations, prMetadata);
       await navigator.clipboard.writeText(feedback);
       setCopyFeedback('Feedback copied!');
       setTimeout(() => setCopyFeedback(null), 2000);
@@ -426,17 +695,27 @@ const ReviewApp: React.FC = () => {
       setCopyFeedback('Failed to copy');
       setTimeout(() => setCopyFeedback(null), 2000);
     }
-  }, [annotations, files]);
+  }, [annotations, prMetadata]);
+
+  const activeFile = files[activeFileIndex];
+  const feedbackMarkdown = useMemo(() => {
+    let output = exportReviewFeedback(annotations, prMetadata);
+    if (editorAnnotations.length > 0) {
+      output += exportEditorAnnotations(editorAnnotations);
+    }
+    return output;
+  }, [annotations, prMetadata, editorAnnotations]);
+
+  const totalAnnotationCount = annotations.length + editorAnnotations.length;
 
   // Send feedback to OpenCode via API
   const handleSendFeedback = useCallback(async () => {
-    if (annotations.length === 0) {
+    if (totalAnnotationCount === 0) {
       setShowNoAnnotationsDialog(true);
       return;
     }
     setIsSendingFeedback(true);
     try {
-      const feedback = exportReviewFeedback(annotations, files);
       const agentSwitchSettings = getAgentSwitchSettings();
       const effectiveAgent = getEffectiveAgentName(agentSwitchSettings);
 
@@ -444,7 +723,8 @@ const ReviewApp: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          feedback,
+          approved: false,
+          feedback: feedbackMarkdown,
           annotations,
           ...(effectiveAgent && { agentSwitch: effectiveAgent }),
         }),
@@ -460,7 +740,7 @@ const ReviewApp: React.FC = () => {
       setTimeout(() => setCopyFeedback(null), 2000);
       setIsSendingFeedback(false);
     }
-  }, [annotations, files]);
+  }, [totalAnnotationCount, feedbackMarkdown, annotations]);
 
   // Approve without feedback (LGTM)
   const handleApprove = useCallback(async () => {
@@ -470,7 +750,8 @@ const ReviewApp: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          feedback: 'LGTM - no changes requested.',
+          approved: true,
+          feedback: 'LGTM - no changes requested.', // unused — integrations branch on `approved` flag
           annotations: [],
         }),
       });
@@ -487,24 +768,191 @@ const ReviewApp: React.FC = () => {
     }
   }, []);
 
+  // Build the payload for /api/pr-action from current annotations
+  const buildPRReviewPayload = useCallback((action: 'approve' | 'comment', generalComment?: string) => {
+    const fileAnnotations = annotations.filter(a => (a.scope ?? 'line') === 'line');
+    const fileScoped = annotations.filter(a => a.scope === 'file');
+
+    // Top-level body: file-scoped comments
+    const bodyParts: string[] = [];
+    if (fileScoped.length > 0) {
+      for (const ann of fileScoped) {
+        if (ann.text) bodyParts.push(`**${ann.filePath}:** ${ann.text}`);
+      }
+    }
+    const body = bodyParts.length > 0
+      ? `${generalComment ? generalComment + '\n\n' : ''}Review from Plannotator\n\n${bodyParts.join('\n\n')}`
+      : generalComment || 'Review from Plannotator';
+
+    // Inline file comments
+    const fileComments = fileAnnotations.map(ann => {
+      let commentBody = ann.text ?? '';
+      if (ann.suggestedCode) {
+        commentBody += `\n\n\`\`\`suggestion\n${ann.suggestedCode}\n\`\`\``;
+      }
+      const side = (ann.side === 'old' ? 'LEFT' : 'RIGHT') as 'LEFT' | 'RIGHT';
+      const isMultiLine = ann.lineStart != null && ann.lineEnd != null && ann.lineStart !== ann.lineEnd;
+      return {
+        path: ann.filePath,
+        line: ann.lineEnd ?? ann.lineStart,
+        side,
+        body: commentBody.trim(),
+        ...(isMultiLine && {
+          start_line: ann.lineStart,
+          start_side: side,
+        }),
+      };
+    }).filter(c => c.body.length > 0);
+
+    // Editor annotations (VS Code extension) — always on new/RIGHT side
+    // Only include annotations targeting files in the diff to avoid GitHub API rejection
+    const diffPaths = new Set(files.map(f => f.path));
+    for (const ea of editorAnnotations) {
+      if (!diffPaths.has(ea.filePath)) continue;
+      const body = ea.comment || `> ${ea.selectedText}`;
+      if (!body.trim()) continue;
+      const isMultiLine = ea.lineStart !== ea.lineEnd;
+      fileComments.push({
+        path: ea.filePath,
+        line: ea.lineEnd,
+        side: 'RIGHT' as const,
+        body: ea.comment ? `> ${ea.selectedText}\n\n${ea.comment}` : `> ${ea.selectedText}`,
+        ...(isMultiLine && {
+          start_line: ea.lineStart,
+          start_side: 'RIGHT' as const,
+        }),
+      });
+    }
+
+    return { action, body, fileComments };
+  }, [annotations, editorAnnotations, files]);
+
+  // Submit a review directly to GitHub
+  const handlePlatformAction = useCallback(async (action: 'approve' | 'comment', generalComment?: string) => {
+    setIsPlatformActioning(true);
+    setPlatformActionError(null);
+    try {
+      const payload = buildPRReviewPayload(action, generalComment);
+      const prRes = await fetch('/api/pr-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const prData = await prRes.json() as { ok?: boolean; prUrl?: string; error?: string };
+      if (!prRes.ok || prData.error) {
+        setPlatformActionError(prData.error ?? 'Failed to submit PR review');
+        setIsPlatformActioning(false);
+        return;
+      }
+
+      // Open PR in browser (if opted in)
+      if (prData.prUrl && platformOpenPR) {
+        window.open(prData.prUrl, '_blank');
+      }
+
+      // Close the local session with a neutral message — don't send annotations to the agent
+      const agentSwitchSettings = getAgentSwitchSettings();
+      const effectiveAgent = getEffectiveAgentName(agentSwitchSettings);
+      const prLink = prData.prUrl ?? '';
+      const statusMessage = action === 'approve'
+        ? `${mrLabel === 'MR' ? 'Merge request' : 'Pull request'} approved on ${platformLabel}${prLink ? ': ' + prLink : ''}`
+        : `${mrLabel === 'MR' ? 'Merge request' : 'Pull request'} reviewed on ${platformLabel}${prLink ? ': ' + prLink : ''}`;
+      await fetch('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          approved: false,
+          feedback: statusMessage,
+          annotations: [],
+          ...(effectiveAgent && { agentSwitch: effectiveAgent }),
+        }),
+      });
+      setSubmitted(action === 'approve' ? 'approved' : 'feedback');
+    } catch (err) {
+      setPlatformActionError(err instanceof Error ? err.message : 'Failed to submit PR review');
+      setIsPlatformActioning(false);
+    }
+  }, [buildPRReviewPayload, platformOpenPR]);
+
+  // Double-tap Option/Alt to toggle review destination (PR mode only)
+  useEffect(() => {
+    if (!prMetadata) return;
+    let lastAltUp = 0;
+    const DOUBLE_TAP_WINDOW = 300;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Alt' || e.repeat) return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key !== 'Alt') return;
+      const now = Date.now();
+      if (now - lastAltUp < DOUBLE_TAP_WINDOW) {
+        setReviewDestination(prev => {
+          const next = prev === 'platform' ? 'agent' : 'platform';
+          storage.setItem('plannotator-review-dest', next);
+          setPlatformActionError(null);
+          return next;
+        });
+        lastAltUp = 0;
+      } else {
+        lastAltUp = now;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [prMetadata]);
+
   // Cmd/Ctrl+Enter keyboard shortcut to approve or send feedback
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey)) return;
 
+      // If the GitHub comment dialog is open, Cmd+Enter submits it
+      if (platformCommentDialog) {
+        if (submitted || isPlatformActioning) return;
+        const isApproveAction = platformCommentDialog.action === 'approve';
+        const canSubmit = isApproveAction || totalAnnotationCount > 0 || platformGeneralComment.trim();
+        if (!canSubmit) return;
+        e.preventDefault();
+        const { action } = platformCommentDialog;
+        setPlatformCommentDialog(null);
+        handlePlatformAction(action, platformGeneralComment);
+        return;
+      }
+
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       if (showExportModal || showNoAnnotationsDialog || showApproveWarning) return;
-      if (submitted || isSendingFeedback || isApproving) return;
+      if (submitted || isSendingFeedback || isApproving || isPlatformActioning) return;
       if (!origin) return; // Demo mode
 
       e.preventDefault();
 
-      // No annotations → Approve, otherwise → Send Feedback
-      if (annotations.length === 0) {
-        handleApprove();
+      if (platformMode) {
+        // GitHub mode: No annotations → Approve on GitHub, otherwise → Post Review
+        const isOwnPR = !!platformUser && prMetadata?.author === platformUser;
+        if (totalAnnotationCount === 0 && !isOwnPR) {
+          setPlatformGeneralComment('');
+          setPlatformCommentDialog({ action: 'approve' });
+        } else {
+          setPlatformGeneralComment('');
+          setPlatformCommentDialog({ action: 'comment' });
+        }
       } else {
-        handleSendFeedback();
+        // Agent mode: No annotations → Approve, otherwise → Send Feedback
+        if (totalAnnotationCount === 0) {
+          handleApprove();
+        } else {
+          handleSendFeedback();
+        }
       }
     };
 
@@ -512,15 +960,11 @@ const ReviewApp: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
     showExportModal, showNoAnnotationsDialog, showApproveWarning,
-    submitted, isSendingFeedback, isApproving, origin, annotations.length,
-    handleApprove, handleSendFeedback
+    platformCommentDialog, platformGeneralComment,
+    submitted, isSendingFeedback, isApproving, isPlatformActioning,
+    origin, platformMode, platformUser, prMetadata, totalAnnotationCount,
+    handleApprove, handleSendFeedback, handlePlatformAction
   ]);
-
-  const activeFile = files[activeFileIndex];
-  const feedbackMarkdown = useMemo(() =>
-    exportReviewFeedback(annotations, files),
-    [annotations, files]
-  );
 
   if (isLoading) {
     return (
@@ -554,26 +998,38 @@ const ReviewApp: React.FC = () => {
             >
               v{typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0'}
             </a>
-            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-secondary/15 text-secondary hidden md:inline">
-              Code Review
+            <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium hidden md:inline ${
+              prMetadata ? 'bg-violet-500/15 text-violet-400' : 'bg-secondary/15 text-secondary'
+            }`}>
+              {prMetadata ? `${mrLabel} Review` : 'Code Review'}
             </span>
-            {origin && (
-              <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium hidden md:inline ${
-                origin === 'claude-code'
-                  ? 'bg-orange-500/15 text-orange-400'
-                  : 'bg-zinc-500/20 text-zinc-400'
-              }`}>
-                {origin === 'claude-code' ? 'Claude Code' : 'OpenCode'}
-              </span>
-            )}
-            {repoInfo && (
+            {prMetadata ? (
               <>
                 <span className="text-muted-foreground/40 hidden md:inline">|</span>
-                <span className="text-xs text-muted-foreground/60 font-mono hidden md:inline truncate max-w-[200px]" title={repoInfo.display}>
+                <span className="text-xs text-muted-foreground/60 hidden md:inline-flex items-center gap-1">
+                  <RepoIcon className="w-3 h-3" />
+                  {displayRepo}
+                </span>
+                <a
+                  href={prMetadata.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-accent/80 hover:text-accent hidden md:inline-flex items-center gap-1 truncate max-w-[300px] transition-colors"
+                  title={prMetadata.title}
+                >
+                  <PullRequestIcon className="w-3 h-3 flex-shrink-0" />
+                  {mrNumberLabel} {prMetadata.title}
+                </a>
+              </>
+            ) : repoInfo ? (
+              <>
+                <span className="text-muted-foreground/40 hidden md:inline">|</span>
+                <span className="text-xs text-muted-foreground/60 hidden md:inline-flex items-center gap-1 truncate max-w-[200px]" title={repoInfo.display}>
+                  <RepoIcon className="w-3 h-3 flex-shrink-0" />
                   {repoInfo.display}
                 </span>
               </>
-            )}
+            ) : null}
           </div>
 
           <div className="flex items-center gap-1 md:gap-2">
@@ -626,55 +1082,168 @@ const ReviewApp: React.FC = () => {
 
             {origin ? (
               <>
-                {/* Send Feedback button - accent color, disabled if no annotations */}
+                {/* Destination dropdown (PR mode only) */}
+                {prMetadata && (
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowDestinationMenu(prev => !prev)}
+                      className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-muted hover:bg-muted/80 transition-colors"
+                      title={reviewDestination === 'platform' ? `Posting to ${platformLabel} ${mrLabel}` : 'Sending to agent session'}
+                    >
+                      {reviewDestination === 'platform' ? (
+                        <>
+                          {prMetadata?.platform === 'gitlab' ? <GitLabIcon className="w-3.5 h-3.5" /> : <GitHubIcon className="w-3.5 h-3.5" />}
+                          <span>{platformLabel}</span>
+                        </>
+                      ) : 'Agent'}
+                      <svg className="w-3 h-3 opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                    {showDestinationMenu && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => setShowDestinationMenu(false)} />
+                        <div className="absolute right-0 top-full mt-1 py-1 bg-popover border border-border rounded-lg shadow-xl z-50 min-w-[160px]">
+                          <button
+                            onClick={() => {
+                              setReviewDestination('platform');
+                              storage.setItem('plannotator-review-dest', 'platform');
+                              setShowDestinationMenu(false);
+                              setPlatformActionError(null);
+                            }}
+                            className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
+                              reviewDestination === 'platform'
+                                ? 'text-foreground bg-muted/50'
+                                : 'text-muted-foreground hover:text-foreground hover:bg-muted/30'
+                            }`}
+                          >
+                            <div className="font-medium">{platformLabel}</div>
+                            <div className="text-muted-foreground/60">Post to {mrLabel}</div>
+                          </button>
+                          <button
+                            onClick={() => {
+                              setReviewDestination('agent');
+                              storage.setItem('plannotator-review-dest', 'agent');
+                              setShowDestinationMenu(false);
+                              setPlatformActionError(null);
+                            }}
+                            className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
+                              reviewDestination === 'agent'
+                                ? 'text-foreground bg-muted/50'
+                                : 'text-muted-foreground hover:text-foreground hover:bg-muted/30'
+                            }`}
+                          >
+                            <div className="font-medium">Agent</div>
+                            <div className="text-muted-foreground/60">Send to session</div>
+                          </button>
+                          <div className="border-t border-border/50 mt-1 pt-1 px-3 py-1">
+                            <span className="text-[10px] text-muted-foreground/40">
+                              <kbd className="inline-flex items-center justify-center min-w-[18px] h-[16px] px-1 rounded bg-muted border border-border/60 border-b-[2px] text-[9px] font-mono leading-none text-foreground/60 shadow-sm">{altKey}</kbd>
+                              <kbd className="inline-flex items-center justify-center min-w-[18px] h-[16px] px-1 rounded bg-muted border border-border/60 border-b-[2px] text-[9px] font-mono leading-none text-foreground/60 shadow-sm ml-0.5">{altKey}</kbd>
+                              <span className="ml-1.5">to toggle</span>
+                            </span>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {/* GitHub error message */}
+                {platformActionError && (
+                  <div
+                    className="text-xs text-destructive px-2 py-1 bg-destructive/10 rounded border border-destructive/20 max-w-[200px] truncate"
+                    title={platformActionError}
+                  >
+                    {platformActionError}
+                  </div>
+                )}
+
+                {/* Send Feedback button — always the same label */}
                 <button
-                  onClick={handleSendFeedback}
-                  disabled={isSendingFeedback || isApproving || annotations.length === 0}
+                  onClick={() => {
+                    if (platformMode) {
+                      setPlatformGeneralComment('');
+                      setPlatformCommentDialog({ action: 'comment' });
+                    } else {
+                      handleSendFeedback();
+                    }
+                  }}
+                  disabled={
+                    isSendingFeedback || isApproving || isPlatformActioning ||
+                    (!platformMode && totalAnnotationCount === 0)
+                  }
                   className={`p-1.5 md:px-2.5 md:py-1 rounded-md text-xs font-medium transition-all ${
-                    isSendingFeedback || isApproving
+                    isSendingFeedback || isApproving || isPlatformActioning
                       ? 'opacity-50 cursor-not-allowed bg-muted text-muted-foreground'
-                      : annotations.length === 0
+                      : !platformMode && totalAnnotationCount === 0
                         ? 'opacity-50 cursor-not-allowed bg-accent/10 text-accent/50'
                         : 'bg-accent/15 text-accent hover:bg-accent/25 border border-accent/30'
                   }`}
-                  title={annotations.length === 0 ? "Add annotations to send feedback" : "Send feedback"}
+                  title={!platformMode && totalAnnotationCount === 0 ? "Add annotations to send feedback" : "Send feedback"}
                 >
                   <svg className="w-4 h-4 md:hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                   </svg>
-                  <span className="hidden md:inline">{isSendingFeedback ? 'Sending...' : 'Send Feedback'}</span>
+                  <span className="hidden md:inline">{
+                    isSendingFeedback || isPlatformActioning
+                      ? (platformMode ? 'Posting...' : 'Sending...')
+                      : (platformMode ? 'Post Comments' : 'Send Feedback')
+                  }</span>
                 </button>
 
-                {/* Approve button - green/success, dimmed if annotations exist */}
+                {/* Approve button — always the same label */}
                 <div className="relative group/approve">
                   <button
                     onClick={() => {
-                      if (annotations.length > 0) {
-                        setShowApproveWarning(true);
+                      if (platformMode) {
+                        if (platformUser && prMetadata?.author === platformUser) return;
+                        setPlatformGeneralComment('');
+                        setPlatformCommentDialog({ action: 'approve' });
                       } else {
-                        handleApprove();
+                        if (totalAnnotationCount > 0) {
+                          setShowApproveWarning(true);
+                        } else {
+                          handleApprove();
+                        }
                       }
                     }}
-                    disabled={isSendingFeedback || isApproving}
+                    disabled={
+                      isSendingFeedback || isApproving || isPlatformActioning ||
+                      (platformMode && !!platformUser && prMetadata?.author === platformUser)
+                    }
                     className={`px-2 py-1 md:px-2.5 rounded-md text-xs font-medium transition-all ${
-                      isSendingFeedback || isApproving
+                      isSendingFeedback || isApproving || isPlatformActioning
                         ? 'opacity-50 cursor-not-allowed bg-muted text-muted-foreground'
-                        : annotations.length > 0
-                          ? 'bg-success/50 text-success-foreground/70 hover:bg-success hover:text-success-foreground'
-                          : 'bg-success text-success-foreground hover:opacity-90'
+                        : platformMode && platformUser && prMetadata?.author === platformUser
+                          ? 'opacity-40 cursor-not-allowed bg-muted text-muted-foreground'
+                          : !platformMode && totalAnnotationCount > 0
+                            ? 'bg-success/50 text-success-foreground/70 hover:bg-success hover:text-success-foreground'
+                            : 'bg-success text-success-foreground hover:opacity-90'
                     }`}
-                    title="Approve - no changes needed"
+                    title={
+                      platformMode && platformUser && prMetadata?.author === platformUser
+                        ? `You can't approve your own ${mrLabel}`
+                        : "Approve - no changes needed"
+                    }
                   >
                     <span className="md:hidden">{isApproving ? '...' : 'OK'}</span>
                     <span className="hidden md:inline">{isApproving ? 'Approving...' : 'Approve'}</span>
                   </button>
-                  {annotations.length > 0 && (
+                  {/* Tooltip: own PR warning OR annotations-lost warning */}
+                  {platformMode && platformUser && prMetadata?.author === platformUser ? (
+                    <div className="absolute top-full right-0 mt-2 px-3 py-2 bg-popover border border-border rounded-lg shadow-xl text-xs text-foreground w-48 text-center opacity-0 invisible group-hover/approve:opacity-100 group-hover/approve:visible transition-all pointer-events-none z-50">
+                      <div className="absolute bottom-full right-4 border-4 border-transparent border-b-border" />
+                      <div className="absolute bottom-full right-4 mt-px border-4 border-transparent border-b-popover" />
+                      You can't approve your own {mrLabel === 'MR' ? 'merge request' : 'pull request'} on {platformLabel}.
+                    </div>
+                  ) : !platformMode && totalAnnotationCount > 0 ? (
                     <div className="absolute top-full right-0 mt-2 px-3 py-2 bg-popover border border-border rounded-lg shadow-xl text-xs text-foreground w-56 text-center opacity-0 invisible group-hover/approve:opacity-100 group-hover/approve:visible transition-all pointer-events-none z-50">
                       <div className="absolute bottom-full right-4 border-4 border-transparent border-b-border" />
                       <div className="absolute bottom-full right-4 mt-px border-4 border-transparent border-b-popover" />
-                      Your {annotations.length} annotation{annotations.length !== 1 ? 's' : ''} won't be sent if you approve.
+                      Your {totalAnnotationCount} annotation{totalAnnotationCount !== 1 ? 's' : ''} won't be sent if you approve.
                     </div>
-                  )}
+                  ) : null}
                 </div>
               </>
             ) : (
@@ -711,6 +1280,8 @@ const ReviewApp: React.FC = () => {
               onIdentityChange={handleIdentityChange}
               origin={origin}
               mode="review"
+              aiProviders={aiProviders}
+              gitUser={gitUser}
             />
 
             {/* Panel toggle */}
@@ -758,32 +1329,80 @@ const ReviewApp: React.FC = () => {
                 onToggleHideViewed={() => setHideViewedFiles(prev => !prev)}
                 enableKeyboardNav={!showExportModal}
                 diffOptions={gitContext?.diffOptions}
-                activeDiffType={diffType}
+                activeDiffType={activeDiffBase}
                 onSelectDiff={handleDiffSwitch}
                 isLoadingDiff={isLoadingDiff}
                 width={fileTreeResize.width}
+                worktrees={gitContext?.worktrees}
+                activeWorktreePath={activeWorktreePath}
+                onSelectWorktree={handleWorktreeSwitch}
+                currentBranch={gitContext?.currentBranch}
+                stagedFiles={stagedFiles}
+                searchQuery={searchQuery}
+                isSearchPending={isSearchPending}
+                searchInputRef={searchInputRef}
+                onSearchChange={handleSearchInputChange}
+                onSearchClear={clearSearch}
+                searchGroups={searchGroups}
+                searchMatches={searchMatches}
+                activeSearchMatchId={activeSearchMatchId}
+                onSelectSearchMatch={handleSelectSearchMatch}
+                onStepSearchMatch={stepSearchMatch}
               />
-              <ResizeHandle {...fileTreeResize.handleProps} />
+              <ResizeHandle {...fileTreeResize.handleProps} side="left" />
             </>
           )}
 
           {/* Diff viewer */}
           <main className="flex-1 min-w-0 overflow-hidden">
+            <ConfirmDialog
+              isOpen={!!draftBanner}
+              onClose={dismissDraft}
+              onConfirm={handleRestoreDraft}
+              title="Draft Recovered"
+              message={draftBanner ? (() => {
+                const parts: string[] = [];
+                if (draftBanner.count > 0) parts.push(`${draftBanner.count} annotation${draftBanner.count !== 1 ? 's' : ''}`);
+                if (draftBanner.viewedCount > 0) parts.push(`${draftBanner.viewedCount} viewed file${draftBanner.viewedCount !== 1 ? 's' : ''}`);
+                return `Found ${parts.join(' and ')} from ${draftBanner.timeAgo}. Would you like to restore them?`;
+              })() : ''}
+              confirmText="Restore"
+              cancelText="Dismiss"
+              showCancel
+            />
             {activeFile ? (
               <DiffViewer
                 patch={activeFile.patch}
                 filePath={activeFile.path}
+                oldPath={activeFile.oldPath}
                 diffStyle={diffStyle}
                 annotations={activeFileAnnotations}
                 selectedAnnotationId={selectedAnnotationId}
                 pendingSelection={pendingSelection}
                 onLineSelection={handleLineSelection}
                 onAddAnnotation={handleAddAnnotation}
+                onAddFileComment={handleAddFileComment}
                 onEditAnnotation={handleEditAnnotation}
                 onSelectAnnotation={handleSelectAnnotation}
                 onDeleteAnnotation={handleDeleteAnnotation}
                 isViewed={viewedFiles.has(activeFile.path)}
                 onToggleViewed={() => handleToggleViewed(activeFile.path)}
+                isStaged={stagedFiles.has(activeFile.path)}
+                isStaging={stagingFile === activeFile.path}
+                onStage={() => stageFile(activeFile.path)}
+                canStage={canStageFiles}
+                stageError={stageError}
+                searchQuery={isSearchPending ? '' : debouncedSearchQuery}
+                searchMatches={activeFileSearchMatches}
+                activeSearchMatchId={activeSearchMatchId}
+                activeSearchMatch={activeSearchMatch?.filePath === activeFile.path ? activeSearchMatch : null}
+                aiAvailable={aiAvailable}
+                onAskAI={handleAskAI}
+                isAILoading={aiChat.isCreatingSession || aiChat.isStreaming}
+                onViewAIResponse={handleViewAIResponse}
+                aiMessages={aiMessagesForCurrentFile}
+                onClickAIMarker={handleClickAIMarker}
+                aiHistoryMessages={aiHistoryForSelection}
               />
             ) : (
               <div className="h-full flex items-center justify-center">
@@ -803,17 +1422,17 @@ const ReviewApp: React.FC = () => {
                     {diffError ? (
                       <>
                         <h3 className="text-sm font-medium text-destructive">Failed to load diff</h3>
-                        <p className="text-xs text-muted-foreground mt-1">{diffError}</p>
+                        <p className="text-xs text-muted-foreground mt-1 max-w-sm break-words line-clamp-3">{diffError}</p>
                       </>
                     ) : (
                       <>
                         <h3 className="text-sm font-medium text-foreground">No changes</h3>
                         <p className="text-xs text-muted-foreground mt-1">
-                          {diffType === 'uncommitted' && "No uncommitted changes to review."}
-                          {diffType === 'staged' && "No staged changes. Stage some files with git add."}
-                          {diffType === 'unstaged' && "No unstaged changes. All changes are staged."}
-                          {diffType === 'last-commit' && "No changes in the last commit."}
-                          {diffType === 'branch' && `No changes between this branch and ${gitContext?.defaultBranch || 'main'}.`}
+                          {activeDiffBase === 'uncommitted' && `No uncommitted changes${activeWorktreePath ? ' in this worktree' : ' to review'}.`}
+                          {activeDiffBase === 'staged' && "No staged changes. Stage some files with git add."}
+                          {activeDiffBase === 'unstaged' && "No unstaged changes. All changes are staged."}
+                          {activeDiffBase === 'last-commit' && `No changes in the last commit${activeWorktreePath ? ' in this worktree' : ''}.`}
+                          {activeDiffBase === 'branch' && `No changes vs ${gitContext?.defaultBranch || 'main'}${activeWorktreePath ? ' in this worktree' : ''}.`}
                         </p>
                       </>
                     )}
@@ -829,7 +1448,7 @@ const ReviewApp: React.FC = () => {
           </main>
 
           {/* Resize Handle */}
-          {isPanelOpen && <ResizeHandle {...panelResize.handleProps} />}
+          {isPanelOpen && <ResizeHandle {...panelResize.handleProps} side="right" />}
 
           {/* Annotations panel */}
           <ReviewPanel
@@ -842,6 +1461,25 @@ const ReviewApp: React.FC = () => {
             onDeleteAnnotation={handleDeleteAnnotation}
             feedbackMarkdown={feedbackMarkdown}
             width={panelResize.width}
+            editorAnnotations={editorAnnotations}
+            onDeleteEditorAnnotation={deleteEditorAnnotation}
+            prMetadata={prMetadata}
+            aiAvailable={aiAvailable}
+            aiMessages={aiChat.messages}
+            isAICreatingSession={aiChat.isCreatingSession}
+            isAIStreaming={aiChat.isStreaming}
+            onScrollToAILines={handleScrollToAILines}
+            activeTabOverride={reviewPanelTabOverride}
+            onTabChange={() => setReviewPanelTabOverride(undefined)}
+            activeFilePath={files[activeFileIndex]?.path}
+            scrollToQuestionId={scrollToQuestionId}
+            onAskGeneral={handleAskGeneral}
+            aiPermissionRequests={aiChat.permissionRequests}
+            onRespondToPermission={aiChat.respondToPermission}
+            aiProviders={aiProviders}
+            aiConfig={aiConfig}
+            onAIConfigChange={handleAIConfigChange}
+            hasAISession={!!aiChat.sessionId}
           />
         </div>
 
@@ -900,7 +1538,7 @@ const ReviewApp: React.FC = () => {
             handleApprove();
           }}
           title="Annotations Won't Be Sent"
-          message={<>You have {annotations.length} annotation{annotations.length !== 1 ? 's' : ''} that will be lost if you approve.</>}
+          message={<>You have {totalAnnotationCount} annotation{totalAnnotationCount !== 1 ? 's' : ''} that will be lost if you approve.</>}
           subMessage="To send your feedback, use Send Feedback instead."
           confirmText="Approve Anyway"
           cancelText="Cancel"
@@ -908,20 +1546,93 @@ const ReviewApp: React.FC = () => {
           showCancel
         />
 
+        {/* AI setup dialog — first-run only */}
+        <AISetupDialog
+          isOpen={showAISetup}
+          providers={aiProviders}
+          onComplete={(providerId) => {
+            setShowAISetup(false);
+            handleAIConfigChange({ providerId });
+          }}
+        />
+
         {/* Completion overlay - shown after approve/feedback */}
         <CompletionOverlay
           submitted={submitted}
           title={submitted === 'approved' ? 'Changes Approved' : 'Feedback Sent'}
           subtitle={
-            submitted === 'approved'
-              ? `${origin === 'claude-code' ? 'Claude Code' : 'OpenCode'} will proceed with the changes.`
-              : `${origin === 'claude-code' ? 'Claude Code' : 'OpenCode'} will address your review feedback.`
+            platformMode
+              ? submitted === 'approved'
+                ? `Your approval was submitted to ${platformLabel}.`
+                : `Your feedback was submitted to ${platformLabel}.`
+              : submitted === 'approved'
+                ? `${origin === 'claude-code' ? 'Claude Code' : origin === 'opencode' ? 'OpenCode' : origin === 'pi' ? 'Pi' : 'Your agent'} will proceed with the changes.`
+                : `${origin === 'claude-code' ? 'Claude Code' : origin === 'opencode' ? 'OpenCode' : origin === 'pi' ? 'Pi' : 'Your agent'} will address your review feedback.`
           }
-          agentLabel={origin === 'claude-code' ? 'Claude Code' : 'OpenCode'}
+          agentLabel={origin === 'claude-code' ? 'Claude Code' : origin === 'opencode' ? 'OpenCode' : origin === 'pi' ? 'Pi' : 'Your agent'}
         />
 
         {/* Update notification */}
-        <UpdateBanner origin={origin} />
+        <UpdateBanner origin={origin} isWSL={isWSL} />
+
+        {/* GitHub general comment dialog */}
+        {platformCommentDialog && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 backdrop-blur-sm p-4">
+            <div className="bg-card border border-border rounded-xl w-full max-w-sm shadow-2xl p-6">
+              <h3 className="font-semibold mb-1">
+                {platformCommentDialog.action === 'approve' ? `Approve ${mrLabel}` : 'Post Review Comment'}
+              </h3>
+              <p className="text-sm text-muted-foreground mb-3">
+                Add a general comment to the review (optional).
+              </p>
+              <textarea
+                autoFocus
+                value={platformGeneralComment}
+                onChange={e => setPlatformGeneralComment(e.target.value)}
+                placeholder="Leave a comment..."
+                rows={4}
+                className="w-full rounded-md border border-border bg-background text-sm px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-primary mb-3"
+              />
+              <label className="flex items-center gap-2 text-sm text-muted-foreground mb-4 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={platformOpenPR}
+                  onChange={e => {
+                    setPlatformOpenPR(e.target.checked);
+                    storage.setItem('plannotator-github-open-pr', String(e.target.checked));
+                  }}
+                  className="rounded border-border"
+                />
+                Open {mrLabel} after submitting
+              </label>
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setPlatformCommentDialog(null)}
+                  className="px-4 py-2 rounded-md text-sm font-medium bg-muted text-muted-foreground hover:bg-muted/80"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    const { action } = platformCommentDialog;
+                    setPlatformCommentDialog(null);
+                    handlePlatformAction(action, platformGeneralComment);
+                  }}
+                  disabled={platformCommentDialog.action !== 'approve' && totalAnnotationCount === 0 && !platformGeneralComment.trim()}
+                  className={`px-4 py-2 rounded-md text-sm font-medium transition-opacity ${
+                    platformCommentDialog.action !== 'approve' && totalAnnotationCount === 0 && !platformGeneralComment.trim()
+                      ? 'opacity-50 cursor-not-allowed bg-muted text-muted-foreground'
+                      : platformCommentDialog.action === 'approve'
+                        ? 'bg-success text-success-foreground hover:opacity-90'
+                        : 'bg-primary text-primary-foreground hover:opacity-90'
+                  }`}
+                >
+                  {platformCommentDialog.action === 'approve' ? 'Approve' : 'Post Comments'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </ThemeProvider>
   );

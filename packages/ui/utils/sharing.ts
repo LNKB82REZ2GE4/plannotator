@@ -15,18 +15,19 @@ import { encrypt, decrypt } from '@plannotator/shared/crypto';
 // Image in shareable format: plain string (old) or [path, name] tuple (new)
 type ShareableImage = string | [string, string];
 
-// Minimal shareable annotation format: [type, originalText, text?, author?, images?]
+// Minimal shareable annotation format: [type, originalText, text?, author?, images?, quickLabel?]
 export type ShareableAnnotation =
-  | ['D', string, string | null, ShareableImage[]?]             // Deletion: type, original, author, images
-  | ['R', string, string, string | null, ShareableImage[]?]     // Replacement: type, original, replacement, author, images
-  | ['C', string, string, string | null, ShareableImage[]?]     // Comment: type, original, comment, author, images
-  | ['I', string, string, string | null, ShareableImage[]?]     // Insertion: type, context, new text, author, images
-  | ['G', string, string | null, ShareableImage[]?];            // Global Comment: type, comment, author, images
+  | ['D', string, string | null, ShareableImage[]?]                    // Deletion: type, original, author, images
+  | ['R', string, string, string | null, ShareableImage[]?]            // Replacement: type, original, replacement, author, images
+  | ['C', string, string, string | null, ShareableImage[]?, (1)?]      // Comment: type, original, comment, author, images, isQuickLabel
+  | ['I', string, string, string | null, ShareableImage[]?]            // Insertion: type, context, new text, author, images
+  | ['G', string, string | null, ShareableImage[]?];                   // Global Comment: type, comment, author, images
 
 export interface SharePayload {
   p: string;  // plan markdown
   a: ShareableAnnotation[];
   g?: ShareableImage[];  // global attachments (path strings or [path, name] tuples)
+  d?: (string | null)[];  // diffContext per annotation, parallel to `a`
 }
 
 /**
@@ -75,6 +76,9 @@ export function toShareable(annotations: Annotation[]): ShareableAnnotation[] {
     }
 
     // R, C, I all have text
+    if (type === 'C' && ann.isQuickLabel) {
+      return ['C', ann.originalText, ann.text || '', author, images ?? undefined, 1] as ShareableAnnotation;
+    }
     return [type, ann.originalText, ann.text || '', author, images] as ShareableAnnotation;
   });
 }
@@ -84,7 +88,7 @@ export function toShareable(annotations: Annotation[]): ShareableAnnotation[] {
  * Note: blockId, offsets, and meta will need to be populated separately
  * by finding the text in the rendered document.
  */
-export function fromShareable(data: ShareableAnnotation[]): Annotation[] {
+export function fromShareable(data: ShareableAnnotation[], diffContexts?: (string | null)[] | null): Annotation[] {
   const typeMap: Record<string, AnnotationType> = {
     'D': AnnotationType.DELETION,
     'R': AnnotationType.REPLACEMENT,
@@ -122,6 +126,8 @@ export function fromShareable(data: ShareableAnnotation[]): Annotation[] {
     const text = type === 'D' ? undefined : item[2] as string;
     const author = type === 'D' ? item[2] as string | null : item[3] as string | null;
     const rawImages = type === 'D' ? item[3] as ShareableImage[] | undefined : item[4] as ShareableImage[] | undefined;
+    // Comment annotations may have isQuickLabel flag at index 5
+    const isQuickLabel = type === 'C' && item.length > 5 && item[5] === 1 ? true : undefined;
 
     return {
       id: `shared-${index}-${Date.now()}`,
@@ -134,9 +140,16 @@ export function fromShareable(data: ShareableAnnotation[]): Annotation[] {
       createdA: Date.now() + index,  // Preserve order
       author: author || undefined,
       images: parseShareableImages(rawImages),
+      ...(isQuickLabel ? { isQuickLabel } : {}),
+      ...(diffContexts?.[index] ? { diffContext: diffContexts[index] as Annotation['diffContext'] } : {}),
       // startMeta/endMeta will be set by web-highlighter
     };
   });
+}
+
+function buildDiffContextArray(annotations: Annotation[]): (string | null)[] | null {
+  const arr = annotations.map(a => a.diffContext || null);
+  return arr.some(v => v !== null) ? arr : null;
 }
 
 /**
@@ -148,10 +161,12 @@ export async function generateShareUrl(
   globalAttachments?: ImageAttachment[],
   baseUrl: string = DEFAULT_SHARE_BASE
 ): Promise<string> {
+  const diffContexts = buildDiffContextArray(annotations);
   const payload: SharePayload = {
     p: markdown,
     a: toShareable(annotations),
     g: globalAttachments?.length ? toShareableImages(globalAttachments) : undefined,
+    ...(diffContexts ? { d: diffContexts } : {}),
   };
 
   const hash = await compress(payload);
@@ -219,10 +234,12 @@ export async function createShortShareUrl(
   const shareBase = options?.shareBaseUrl ?? DEFAULT_SHARE_BASE;
 
   try {
+    const diffContexts = buildDiffContextArray(annotations);
     const payload: SharePayload = {
       p: markdown,
       a: toShareable(annotations),
       g: globalAttachments?.length ? toShareableImages(globalAttachments) : undefined,
+      ...(diffContexts ? { d: diffContexts } : {}),
     };
 
     const compressed = await compress(payload);

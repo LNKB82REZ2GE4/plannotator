@@ -1,15 +1,42 @@
 import React, { useRef, useState, useEffect, forwardRef, useImperativeHandle, useCallback } from 'react';
-import Highlighter from '@plannotator/web-highlighter';
+import { createPortal } from 'react-dom';
 import hljs from 'highlight.js';
 import 'highlight.js/styles/github-dark.css';
-import { Block, Annotation, AnnotationType, EditorMode, type ImageAttachment } from '../types';
+import { Block, Annotation, AnnotationType, EditorMode, type InputMethod, type ImageAttachment } from '../types';
 import { Frontmatter } from '../utils/parser';
 import { AnnotationToolbar } from './AnnotationToolbar';
+import { FloatingQuickLabelPicker } from './FloatingQuickLabelPicker';
+
+// Debug error boundary to catch silent toolbar crashes
+class ToolbarErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  componentDidCatch(error: Error) { console.error('AnnotationToolbar crashed:', error); }
+  render() {
+    if (this.state.error) {
+      return <div style={{ position: 'fixed', top: 10, left: 10, zIndex: 9999, background: 'red', color: 'white', padding: '8px 12px', borderRadius: 6, fontSize: 12 }}>
+        Toolbar error: {this.state.error.message}
+      </div>;
+    }
+    return this.props.children;
+  }
+}
+import { CommentPopover } from './CommentPopover';
 import { TaterSpriteSitting } from './TaterSpriteSitting';
 import { AttachmentsButton } from './AttachmentsButton';
+import { GraphvizBlock } from './GraphvizBlock';
 import { MermaidBlock } from './MermaidBlock';
+import { getImageSrc } from './ImageThumbnail';
+import { isGraphvizLanguage, isMermaidLanguage } from './diagramLanguages';
 import { getIdentity } from '../utils/identity';
+import { type QuickLabel } from '../utils/quickLabels';
 import { PlanDiffBadge } from './plan-diff/PlanDiffBadge';
+import { PinpointOverlay } from './PinpointOverlay';
+import { usePinpoint } from '../hooks/usePinpoint';
+import { useAnnotationHighlighter } from '../hooks/useAnnotationHighlighter';
 
 interface ViewerProps {
   blocks: Block[];
@@ -20,6 +47,7 @@ interface ViewerProps {
   onSelectAnnotation: (id: string | null) => void;
   selectedAnnotationId: string | null;
   mode: EditorMode;
+  inputMethod?: InputMethod;
   taterMode: boolean;
   globalAttachments?: ImageAttachment[];
   onAddGlobalAttachment?: (image: ImageAttachment) => void;
@@ -27,6 +55,7 @@ interface ViewerProps {
   repoInfo?: { display: string; branch?: string } | null;
   stickyActions?: boolean;
   onOpenLinkedDoc?: (path: string) => void;
+  imageBaseDir?: string;
   linkedDocInfo?: { filepath: string; onBack: () => void; label?: string } | null;
   // Plan diff props
   planDiffStats?: { additions: number; deletions: number; modifications: number } | null;
@@ -35,6 +64,11 @@ interface ViewerProps {
   hasPreviousVersion?: boolean;
   /** Show amber "Demo" badge (portal mode, no shared content loaded) */
   showDemoBadge?: boolean;
+  /** Max width in px for the plan card (from plan width setting) */
+  maxWidth?: number;
+  /** Label for the copy button (default: "Copy plan") */
+  copyLabel?: string;
+  archiveInfo?: { status: 'approved' | 'denied' | 'unknown'; timestamp: string; title: string } | null;
 }
 
 export interface ViewerHandle {
@@ -85,6 +119,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   onSelectAnnotation,
   selectedAnnotationId,
   mode,
+  inputMethod = 'drag',
   taterMode,
   globalAttachments = [],
   onAddGlobalAttachment,
@@ -96,13 +131,16 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   onPlanDiffToggle,
   hasPreviousVersion,
   showDemoBadge,
+  maxWidth,
   onOpenLinkedDoc,
   linkedDocInfo,
+  imageBaseDir,
+  copyLabel,
+  archiveInfo,
 }, ref) => {
   const [copied, setCopied] = useState(false);
-  const [showGlobalCommentInput, setShowGlobalCommentInput] = useState(false);
-  const [globalCommentValue, setGlobalCommentValue] = useState('');
-  const globalCommentInputRef = useRef<HTMLTextAreaElement>(null);
+  const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
+  const globalCommentButtonRef = useRef<HTMLButtonElement>(null);
 
   const handleCopyPlan = async () => {
     try {
@@ -113,50 +151,103 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
       console.error('Failed to copy:', e);
     }
   };
-
-  const handleAddGlobalComment = () => {
-    if (!globalCommentValue.trim()) return;
-
-    const newAnnotation: Annotation = {
-      id: `global-${Date.now()}`,
-      blockId: '',
-      startOffset: 0,
-      endOffset: 0,
-      type: AnnotationType.GLOBAL_COMMENT,
-      text: globalCommentValue.trim(),
-      originalText: '',
-      createdA: Date.now(),
-      author: getIdentity(),
-    };
-
-    onAddAnnotation(newAnnotation);
-    setGlobalCommentValue('');
-    setShowGlobalCommentInput(false);
-  };
-
-  useEffect(() => {
-    if (showGlobalCommentInput) {
-      globalCommentInputRef.current?.focus();
-    }
-  }, [showGlobalCommentInput]);
   const containerRef = useRef<HTMLDivElement>(null);
-  const highlighterRef = useRef<Highlighter | null>(null);
-  const modeRef = useRef<EditorMode>(mode);
-  const onAddAnnotationRef = useRef(onAddAnnotation);
-  const pendingSourceRef = useRef<any>(null);
-  const [toolbarState, setToolbarState] = useState<{
-    element: HTMLElement;
-    source: any;
-    selectionText: string;
-    initialStep?: 'menu' | 'input';
-    initialType?: AnnotationType;
-  } | null>(null);
   const [hoveredCodeBlock, setHoveredCodeBlock] = useState<{ block: Block; element: HTMLElement } | null>(null);
   const [isCodeBlockToolbarExiting, setIsCodeBlockToolbarExiting] = useState(false);
-  const [isCodeBlockToolbarLocked, setIsCodeBlockToolbarLocked] = useState(false);
+  // Viewer-specific comment popover state (global comments + code blocks)
+  const [viewerCommentPopover, setViewerCommentPopover] = useState<{
+    anchorEl: HTMLElement;
+    contextText: string;
+    initialText?: string;
+    isGlobal: boolean;
+    codeBlock?: { block: Block; element: HTMLElement };
+  } | null>(null);
+  // Viewer-specific quick label state (code blocks)
+  const [codeBlockQuickLabelPicker, setCodeBlockQuickLabelPicker] = useState<{
+    anchorEl: HTMLElement;
+    codeBlock: { block: Block; element: HTMLElement };
+  } | null>(null);
   const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const stickySentinelRef = useRef<HTMLDivElement>(null);
   const [isStuck, setIsStuck] = useState(false);
+
+  // Shared annotation infrastructure via hook
+  const {
+    highlighterRef,
+    toolbarState,
+    commentPopover: hookCommentPopover,
+    quickLabelPicker: hookQuickLabelPicker,
+    handleAnnotate,
+    handleQuickLabel,
+    handleToolbarClose,
+    handleRequestComment,
+    handleCommentSubmit: hookCommentSubmit,
+    handleCommentClose: hookCommentClose,
+    handleFloatingQuickLabel: hookFloatingQuickLabel,
+    handleQuickLabelPickerDismiss: hookQuickLabelPickerDismiss,
+    removeHighlight: hookRemoveHighlight,
+    clearAllHighlights,
+    applyAnnotations,
+  } = useAnnotationHighlighter({
+    containerRef,
+    annotations,
+    onAddAnnotation,
+    onSelectAnnotation,
+    selectedAnnotationId,
+    mode,
+  });
+
+  // Refs for code block annotation path
+  const onAddAnnotationRef = useRef(onAddAnnotation);
+  useEffect(() => { onAddAnnotationRef.current = onAddAnnotation; }, [onAddAnnotation]);
+  const modeRef = useRef<EditorMode>(mode);
+  useEffect(() => { modeRef.current = mode; }, [mode]);
+
+  // Pinpoint mode: hover + click to select elements
+  const handlePinpointCodeBlockClick = useCallback((blockId: string, element: HTMLElement) => {
+    const codeEl = element.querySelector('code');
+    if (!codeEl) return;
+    // In pinpoint mode, apply code block annotation based on current editor mode
+    if (modeRef.current === 'redline') {
+      applyCodeBlockAnnotation(blockId, codeEl, AnnotationType.DELETION);
+    } else if (modeRef.current === 'quickLabel') {
+      setCodeBlockQuickLabelPicker({
+        anchorEl: element,
+        codeBlock: { block: blocks.find(b => b.id === blockId)!, element },
+      });
+    } else {
+      // Show comment popover anchored to the code block
+      setViewerCommentPopover({
+        anchorEl: element,
+        contextText: (codeEl.textContent || '').slice(0, 80),
+        isGlobal: false,
+        codeBlock: { block: blocks.find(b => b.id === blockId)!, element },
+      });
+    }
+  }, [blocks]);
+
+  const { hoverTarget } = usePinpoint({
+    containerRef,
+    highlighterRef,
+    inputMethod,
+    enabled: !toolbarState && !hookCommentPopover && !viewerCommentPopover && !hookQuickLabelPicker && !codeBlockQuickLabelPicker && !(isPlanDiffActive ?? false),
+    onCodeBlockClick: handlePinpointCodeBlockClick,
+  });
+
+  // Suppress native context menu on touch devices (prevents cut/copy/paste overlay on mobile)
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const isTouchPrimary = window.matchMedia('(pointer: coarse)').matches;
+    if (!isTouchPrimary) return;
+
+    const handleContextMenu = (e: Event) => {
+      e.preventDefault();
+    };
+
+    container.addEventListener('contextmenu', handleContextMenu);
+    return () => container.removeEventListener('contextmenu', handleContextMenu);
+  }, []);
 
   // Detect when sticky action bar is "stuck" to show card background
   useEffect(() => {
@@ -169,15 +260,6 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     observer.observe(stickySentinelRef.current);
     return () => observer.disconnect();
   }, [stickyActions]);
-
-  // Keep refs in sync with props
-  useEffect(() => {
-    modeRef.current = mode;
-  }, [mode]);
-
-  useEffect(() => {
-    onAddAnnotationRef.current = onAddAnnotation;
-  }, [onAddAnnotation]);
 
   // Cmd+C / Ctrl+C keyboard shortcut for copying selected text
   useEffect(() => {
@@ -205,420 +287,57 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [toolbarState]);
 
-  // Helper to create annotation from highlighter source
-  const createAnnotationFromSource = (
-    highlighter: Highlighter,
-    source: any,
-    type: AnnotationType,
-    text?: string,
-    images?: ImageAttachment[]
-  ) => {
-    const doms = highlighter.getDoms(source.id);
-    let blockId = '';
-    let startOffset = 0;
-
-    if (doms?.length > 0) {
-      const el = doms[0] as HTMLElement;
-      let parent = el.parentElement;
-      while (parent && !parent.dataset.blockId) {
-        parent = parent.parentElement;
-      }
-      if (parent?.dataset.blockId) {
-        blockId = parent.dataset.blockId;
-        const blockText = parent.textContent || '';
-        const beforeText = blockText.split(source.text)[0];
-        startOffset = beforeText?.length || 0;
-      }
-    }
-
-    const newAnnotation: Annotation = {
-      id: source.id,
-      blockId,
-      startOffset,
-      endOffset: startOffset + source.text.length,
-      type,
-      text,
-      originalText: source.text,
-      createdA: Date.now(),
-      author: getIdentity(),
-      startMeta: source.startMeta,
-      endMeta: source.endMeta,
-      images,
-    };
-
-    if (type === AnnotationType.DELETION) {
-      highlighter.addClass('deletion', source.id);
-    } else if (type === AnnotationType.COMMENT) {
-      highlighter.addClass('comment', source.id);
-    }
-
-    onAddAnnotationRef.current(newAnnotation);
-  };
-
-  // Helper to find text in DOM and create a range
-  const findTextInDOM = useCallback((searchText: string): Range | null => {
-    if (!containerRef.current) return null;
-
-    const walker = document.createTreeWalker(
-      containerRef.current,
-      NodeFilter.SHOW_TEXT,
-      null
-    );
-
-    let node: Text | null;
-    while ((node = walker.nextNode() as Text | null)) {
-      const text = node.textContent || '';
-      const index = text.indexOf(searchText);
-      if (index !== -1) {
-        const range = document.createRange();
-        range.setStart(node, index);
-        range.setEnd(node, index + searchText.length);
-        return range;
-      }
-    }
-
-    // Try across multiple text nodes for multi-line content
-    const fullText = containerRef.current.textContent || '';
-    const searchIndex = fullText.indexOf(searchText);
-    if (searchIndex === -1) return null;
-
-    // Use Selection API to find and select the text
-    const selection = window.getSelection();
-    if (!selection) return null;
-
-    // Reset walker
-    const walker2 = document.createTreeWalker(
-      containerRef.current,
-      NodeFilter.SHOW_TEXT,
-      null
-    );
-
-    let charCount = 0;
-    let startNode: Text | null = null;
-    let startOffset = 0;
-    let endNode: Text | null = null;
-    let endOffset = 0;
-
-    while ((node = walker2.nextNode() as Text | null)) {
-      const nodeLength = node.textContent?.length || 0;
-
-      if (!startNode && charCount + nodeLength > searchIndex) {
-        startNode = node;
-        startOffset = searchIndex - charCount;
-      }
-
-      if (startNode && charCount + nodeLength >= searchIndex + searchText.length) {
-        endNode = node;
-        endOffset = searchIndex + searchText.length - charCount;
-        break;
-      }
-
-      charCount += nodeLength;
-    }
-
-    if (startNode && endNode) {
-      const range = document.createRange();
-      range.setStart(startNode, startOffset);
-      range.setEnd(endNode, endOffset);
-      return range;
-    }
-
-    return null;
-  }, []);
-
+  // Imperative handle — delegates to hook, extends removeHighlight for code blocks
   useImperativeHandle(ref, () => ({
     removeHighlight: (id: string) => {
-      // Try highlighter first (for regular text selections)
-      highlighterRef.current?.remove(id);
-
-      // Handle manually created highlights (may be multiple marks with same ID)
+      // Code block annotations need syntax re-highlighting after removal.
+      // Must run BEFORE hookRemoveHighlight, which removes the <mark> elements.
       const manualHighlights = containerRef.current?.querySelectorAll(`[data-bind-id="${id}"]`);
       manualHighlights?.forEach(el => {
         const parent = el.parentNode;
-        
-        // Check if this is a code block annotation (parent is <code> element)
         if (parent && parent.nodeName === 'CODE') {
-          // For code blocks, we need to restore the plain text and re-highlight
           const codeEl = parent as HTMLElement;
           const plainText = el.textContent || '';
+          el.remove();
           codeEl.textContent = plainText;
-          
-          // Re-apply syntax highlighting
           const block = blocks.find(b => b.id === codeEl.closest('[data-block-id]')?.getAttribute('data-block-id'));
-          if (block?.language) {
-            codeEl.className = `hljs font-mono language-${block.language}`;
-            hljs.highlightElement(codeEl);
-          }
-        } else {
-          // For regular text, unwrap the mark
-          while (el.firstChild) {
-            parent?.insertBefore(el.firstChild, el);
-          }
+          codeEl.removeAttribute('data-highlighted');
+          codeEl.className = `hljs font-mono${block?.language ? ` language-${block.language}` : ''}`;
+          hljs.highlightElement(codeEl);
         }
-        el.remove();
       });
+
+      hookRemoveHighlight(id);
     },
+    clearAllHighlights,
+    applySharedAnnotations: applyAnnotations,
+  }), [hookRemoveHighlight, clearAllHighlights, applyAnnotations, blocks]);
 
-    clearAllHighlights: () => {
-      // Clear all manual highlights (shared annotations and code blocks)
-      const manualHighlights = containerRef.current?.querySelectorAll('[data-bind-id]');
-      manualHighlights?.forEach(el => {
-        const parent = el.parentNode;
-        while (el.firstChild) {
-          parent?.insertBefore(el.firstChild, el);
-        }
-        el.remove();
-      });
+  // --- Viewer-specific: code block annotation ---
 
-      // Clear web-highlighter highlights
-      const webHighlights = containerRef.current?.querySelectorAll('.annotation-highlight');
-      webHighlights?.forEach(el => {
-        const parent = el.parentNode;
-        while (el.firstChild) {
-          parent?.insertBefore(el.firstChild, el);
-        }
-        el.remove();
-      });
-    },
-
-    applySharedAnnotations: (sharedAnnotations: Annotation[]) => {
-      const highlighter = highlighterRef.current;
-      if (!highlighter || !containerRef.current) return;
-
-      sharedAnnotations.forEach(ann => {
-        // Skip if already highlighted
-        const existingDoms = highlighter.getDoms(ann.id);
-        if (existingDoms && existingDoms.length > 0) return;
-
-        // Also skip if manually highlighted
-        const existingManual = containerRef.current?.querySelector(`[data-bind-id="${ann.id}"]`);
-        if (existingManual) return;
-
-        // Find the text in the DOM
-        const range = findTextInDOM(ann.originalText);
-        if (!range) {
-          console.warn(`Could not find text for annotation ${ann.id}: "${ann.originalText.slice(0, 50)}..."`);
-          return;
-        }
-
-        try {
-          // Multi-mark approach: wrap each text node portion separately
-          // This avoids destructive extractContents() that breaks DOM structure
-          const textNodes: { node: Text; start: number; end: number }[] = [];
-
-          // Collect all text nodes within the range
-          const walker = document.createTreeWalker(
-            range.commonAncestorContainer.nodeType === Node.TEXT_NODE
-              ? range.commonAncestorContainer.parentNode!
-              : range.commonAncestorContainer,
-            NodeFilter.SHOW_TEXT,
-            null
-          );
-
-          let node: Text | null;
-          let inRange = false;
-
-          while ((node = walker.nextNode() as Text | null)) {
-            // Check if this node is the start container
-            if (node === range.startContainer) {
-              inRange = true;
-              const start = range.startOffset;
-              const end = node === range.endContainer ? range.endOffset : node.length;
-              if (end > start) {
-                textNodes.push({ node, start, end });
-              }
-              if (node === range.endContainer) break;
-              continue;
-            }
-
-            // Check if this node is the end container
-            if (node === range.endContainer) {
-              if (inRange) {
-                const end = range.endOffset;
-                if (end > 0) {
-                  textNodes.push({ node, start: 0, end });
-                }
-              }
-              break;
-            }
-
-            // Node is fully within range
-            if (inRange && node.length > 0) {
-              textNodes.push({ node, start: 0, end: node.length });
-            }
-          }
-
-          // If we only have one text node and it's fully contained, use simple approach
-          if (textNodes.length === 0) {
-            console.warn(`No text nodes found for annotation ${ann.id}`);
-            return;
-          }
-
-          // Wrap each text node portion with its own mark (process in reverse to avoid offset issues)
-          textNodes.reverse().forEach(({ node, start, end }) => {
-            try {
-              const nodeRange = document.createRange();
-              nodeRange.setStart(node, start);
-              nodeRange.setEnd(node, end);
-
-              const mark = document.createElement('mark');
-              mark.className = 'annotation-highlight';
-              mark.dataset.bindId = ann.id;
-
-              if (ann.type === AnnotationType.DELETION) {
-                mark.classList.add('deletion');
-              } else if (ann.type === AnnotationType.COMMENT) {
-                mark.classList.add('comment');
-              }
-
-              // surroundContents works reliably for single text node ranges
-              nodeRange.surroundContents(mark);
-
-              // Make it clickable
-              mark.addEventListener('click', () => {
-                onSelectAnnotation(ann.id);
-              });
-            } catch (e) {
-              console.warn(`Failed to wrap text node for annotation ${ann.id}:`, e);
-            }
-          });
-        } catch (e) {
-          console.warn(`Failed to apply highlight for annotation ${ann.id}:`, e);
-        }
-      });
-    }
-  }), [findTextInDOM, onSelectAnnotation]);
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-
-    const highlighter = new Highlighter({
-      $root: containerRef.current,
-      exceptSelectors: ['.annotation-toolbar', 'button'],
-      wrapTag: 'mark',
-      style: { className: 'annotation-highlight' }
-    });
-
-    highlighterRef.current = highlighter;
-
-    highlighter.on(Highlighter.event.CREATE, ({ sources }: { sources: any[] }) => {
-      if (sources.length > 0) {
-        const source = sources[0];
-        const doms = highlighter.getDoms(source.id);
-        if (doms?.length > 0) {
-          // Clean up previous pending highlight if exists
-          if (pendingSourceRef.current) {
-            highlighter.remove(pendingSourceRef.current.id);
-            pendingSourceRef.current = null;
-          }
-
-          if (modeRef.current === 'redline') {
-            // Auto-delete in redline mode
-            createAnnotationFromSource(highlighter, source, AnnotationType.DELETION);
-            window.getSelection()?.removeAllRanges();
-          } else if (modeRef.current === 'comment') {
-            // Comment mode - show input directly
-            const selectionText = source.text;
-            pendingSourceRef.current = source;
-            setToolbarState({
-              element: doms[0] as HTMLElement,
-              source,
-              selectionText,
-              initialStep: 'input',
-              initialType: AnnotationType.COMMENT,
-            });
-          } else {
-            // Selection mode - show toolbar menu
-            const selectionText = source.text;
-            pendingSourceRef.current = source;
-            setToolbarState({ element: doms[0] as HTMLElement, source, selectionText });
-          }
-        }
-      }
-    });
-
-    highlighter.on(Highlighter.event.CLICK, ({ id }: { id: string }) => {
-      onSelectAnnotation(id);
-    });
-
-    highlighter.run();
-
-    return () => highlighter.dispose();
-  }, [onSelectAnnotation]);
-
-
-  useEffect(() => {
-    const highlighter = highlighterRef.current;
-    if (!highlighter) return;
-
-    annotations.forEach(ann => {
-      try {
-        const doms = highlighter.getDoms(ann.id);
-        if (doms?.length > 0) {
-          if (ann.type === AnnotationType.DELETION) {
-            highlighter.addClass('deletion', ann.id);
-          } else if (ann.type === AnnotationType.COMMENT) {
-            highlighter.addClass('comment', ann.id);
-          }
-        }
-      } catch (e) {}
-    });
-  }, [annotations]);
-
-  const handleAnnotate = (type: AnnotationType, text?: string, images?: ImageAttachment[]) => {
-    const highlighter = highlighterRef.current;
-    if (!toolbarState || !highlighter) return;
-
-    createAnnotationFromSource(highlighter, toolbarState.source, type, text, images);
-    pendingSourceRef.current = null;
-    setToolbarState(null);
-    window.getSelection()?.removeAllRanges();
-  };
-
-  const handleToolbarClose = () => {
-    if (toolbarState && highlighterRef.current) {
-      highlighterRef.current.remove(toolbarState.source.id);
-    }
-    pendingSourceRef.current = null;
-    setToolbarState(null);
-    window.getSelection()?.removeAllRanges();
-  };
-
-  const handleCodeBlockAnnotate = (type: AnnotationType, text?: string, images?: ImageAttachment[]) => {
-    const highlighter = highlighterRef.current;
-    if (!hoveredCodeBlock || !highlighter) return;
-
-    // Find the code element inside the pre
-    const codeEl = hoveredCodeBlock.element.querySelector('code');
-    if (!codeEl) return;
-
-    // Use highlighter.fromRange which triggers CREATE event internally
-    // We need to handle this synchronously, so we'll create the annotation directly
+  const applyCodeBlockAnnotation = (
+    blockId: string,
+    codeEl: Element,
+    type: AnnotationType,
+    text?: string,
+    images?: ImageAttachment[],
+    isQuickLabel?: boolean,
+    quickLabelTip?: string,
+  ) => {
     const id = `codeblock-${Date.now()}`;
     const codeText = codeEl.textContent || '';
 
-    // Instead of using surroundContents (which breaks with syntax-highlighted code),
-    // we replace the innerHTML entirely with a mark wrapper containing the plain text
     const wrapper = document.createElement('mark');
-    wrapper.className = 'annotation-highlight';
+    wrapper.className = `annotation-highlight ${type === AnnotationType.DELETION ? 'deletion' : type === AnnotationType.COMMENT ? 'comment' : ''}`.trim();
     wrapper.dataset.bindId = id;
     wrapper.textContent = codeText;
 
-    // Add the appropriate class
-    if (type === AnnotationType.DELETION) {
-      wrapper.classList.add('deletion');
-    } else if (type === AnnotationType.COMMENT) {
-      wrapper.classList.add('comment');
-    }
-
-    // Replace code element's content with the wrapper
     codeEl.innerHTML = '';
     codeEl.appendChild(wrapper);
 
-    // Create the annotation
     const newAnnotation: Annotation = {
       id,
-      blockId: hoveredCodeBlock.block.id,
+      blockId,
       startOffset: 0,
       endOffset: codeText.length,
       type,
@@ -627,32 +346,95 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
       createdA: Date.now(),
       author: getIdentity(),
       images,
+      ...(isQuickLabel ? { isQuickLabel: true } : {}),
+      ...(quickLabelTip ? { quickLabelTip } : {}),
     };
 
     onAddAnnotationRef.current(newAnnotation);
-
-    // Clear selection
     window.getSelection()?.removeAllRanges();
+  };
+
+  const handleCodeBlockAnnotate = (type: AnnotationType) => {
+    if (!hoveredCodeBlock) return;
+    const codeEl = hoveredCodeBlock.element.querySelector('code');
+    if (!codeEl) return;
+    applyCodeBlockAnnotation(hoveredCodeBlock.block.id, codeEl, type);
     setHoveredCodeBlock(null);
-    setIsCodeBlockToolbarLocked(false);
+  };
+
+  const handleCodeBlockQuickLabel = (label: QuickLabel) => {
+    if (!hoveredCodeBlock) return;
+    const codeEl = hoveredCodeBlock.element.querySelector('code');
+    if (!codeEl) return;
+    applyCodeBlockAnnotation(
+      hoveredCodeBlock.block.id, codeEl, AnnotationType.COMMENT,
+      `${label.emoji} ${label.text}`, undefined, true, label.tip
+    );
+    setHoveredCodeBlock(null);
   };
 
   const handleCodeBlockToolbarClose = () => {
     setHoveredCodeBlock(null);
-    setIsCodeBlockToolbarLocked(false);
   };
 
+  // Viewer-specific comment popover handlers (code blocks + global comments)
+
+  const handleCodeBlockRequestComment = (initialChar?: string) => {
+    if (!hoveredCodeBlock) return;
+    const codeText = hoveredCodeBlock.element.querySelector('code')?.textContent || '';
+    setViewerCommentPopover({
+      anchorEl: hoveredCodeBlock.element,
+      contextText: codeText.slice(0, 80),
+      initialText: initialChar,
+      isGlobal: false,
+      codeBlock: hoveredCodeBlock,
+    });
+    setHoveredCodeBlock(null);
+  };
+
+  const handleViewerCommentSubmit = (text: string, images?: ImageAttachment[]) => {
+    if (!viewerCommentPopover) return;
+
+    if (viewerCommentPopover.isGlobal) {
+      const newAnnotation: Annotation = {
+        id: `global-${Date.now()}`,
+        blockId: '',
+        startOffset: 0,
+        endOffset: 0,
+        type: AnnotationType.GLOBAL_COMMENT,
+        text: text.trim(),
+        originalText: '',
+        createdA: Date.now(),
+        author: getIdentity(),
+        images,
+      };
+      onAddAnnotation(newAnnotation);
+    } else if (viewerCommentPopover.codeBlock) {
+      const codeEl = viewerCommentPopover.codeBlock.element.querySelector('code');
+      if (codeEl) {
+        applyCodeBlockAnnotation(viewerCommentPopover.codeBlock.block.id, codeEl, AnnotationType.COMMENT, text, images);
+      }
+    }
+
+    setViewerCommentPopover(null);
+  };
+
+  const handleViewerCommentClose = useCallback(() => {
+    setViewerCommentPopover(null);
+  }, []);
+
   return (
-    <div className="relative z-50 w-full max-w-[832px] 2xl:max-w-5xl">
+    <div className="relative z-50 w-full" style={maxWidth ? { maxWidth } : { maxWidth: 832 }}>
       {taterMode && <TaterSpriteSitting />}
       <article
         ref={containerRef}
-        className={`w-full max-w-[832px] 2xl:max-w-5xl bg-card rounded-xl shadow-xl p-5 md:p-8 lg:p-10 xl:p-12 relative ${
-          linkedDocInfo ? 'border-2 border-primary' : 'border border-border/50'
-        }`}
+        className={`w-full bg-card rounded-xl shadow-xl p-5 md:p-8 lg:p-10 xl:p-12 relative ${
+          linkedDocInfo ? 'border border-primary/40' : 'border border-border/50'
+        } ${inputMethod === 'pinpoint' ? 'cursor-crosshair' : ''}`}
+        style={{ WebkitTouchCallout: 'none' } as React.CSSProperties}
       >
-        {/* Repo info + plan diff badge + demo badge + linked doc badge - top left */}
-        {(repoInfo || hasPreviousVersion || showDemoBadge || linkedDocInfo) && (
+        {/* Repo info + plan diff badge + demo badge + linked doc badge + archive badge - top left */}
+        {(repoInfo || hasPreviousVersion || showDemoBadge || linkedDocInfo || archiveInfo) && (
           <div className="absolute top-3 left-3 md:top-4 md:left-5 flex flex-col items-start gap-1 text-[9px] text-muted-foreground/50 font-mono">
             {repoInfo && !linkedDocInfo && (
               <div className="flex items-center gap-1.5">
@@ -681,6 +463,26 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-amber-500/15 text-amber-600 dark:text-amber-400">
                 Demo
               </span>
+            )}
+            {archiveInfo && !linkedDocInfo && (
+              <div className="flex items-center gap-1.5">
+                <span className={`px-1.5 py-0.5 rounded ${
+                  archiveInfo.status === 'approved'
+                    ? 'bg-green-500/15 text-green-600 dark:text-green-400'
+                    : archiveInfo.status === 'denied'
+                      ? 'bg-red-500/15 text-red-600 dark:text-red-400'
+                      : 'bg-muted/50 text-muted-foreground'
+                }`}>
+                  {archiveInfo.status === 'approved' ? 'Approved' : archiveInfo.status === 'denied' ? 'Denied' : 'Unknown'}
+                </span>
+                {archiveInfo.timestamp && (
+                  <span className="px-1.5 py-0.5 bg-muted/50 rounded" title={archiveInfo.timestamp}>
+                    {new Date(archiveInfo.timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                    {' '}
+                    {new Date(archiveInfo.timestamp).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
+                  </span>
+                )}
+              </div>
             )}
             {linkedDocInfo && (
               <div className="flex items-center gap-1.5">
@@ -711,7 +513,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         {stickyActions && <div ref={stickySentinelRef} className="h-0 w-0 float-right" aria-hidden="true" />}
 
         {/* Header buttons - top right */}
-        <div className={`${stickyActions ? 'sticky top-3' : ''} z-30 float-right flex items-start gap-2 rounded-lg p-2 transition-colors duration-150 ${isStuck ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''} -mr-4 -mt-4 md:-mr-5 md:-mt-5 lg:-mr-7 lg:-mt-7 xl:-mr-9 xl:-mt-9`}>
+        <div className={`${stickyActions ? 'sticky top-3' : ''} z-30 float-right flex items-start gap-1 md:gap-2 rounded-lg p-1 md:p-2 transition-colors duration-150 ${isStuck ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''} -mr-3 mt-6 md:-mr-5 md:-mt-5 lg:-mr-7 lg:-mt-7 xl:-mr-9 xl:-mt-9`}>
           {/* Attachments button */}
           {onAddGlobalAttachment && onRemoveGlobalAttachment && (
             <AttachmentsButton
@@ -722,102 +524,66 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             />
           )}
 
-          {/* Global comment button/input */}
-          {showGlobalCommentInput ? (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleAddGlobalComment();
-              }}
-              className="flex items-start gap-1.5 bg-muted/80 rounded-md p-1"
-            >
-              <textarea
-                ref={globalCommentInputRef}
-                rows={1}
-                className="bg-transparent text-xs min-w-40 md:min-w-56 max-w-80 max-h-32 placeholder:text-muted-foreground resize-none px-2 py-1.5 focus:outline-none"
-                style={{ fieldSizing: 'content' } as React.CSSProperties}
-                placeholder="Add a global comment..."
-                value={globalCommentValue}
-                onChange={(e) => setGlobalCommentValue(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Escape') {
-                    setShowGlobalCommentInput(false);
-                    setGlobalCommentValue('');
-                  }
-                  // Enter to submit, Shift+Enter for newline
-                  if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                    e.preventDefault();
-                    if (globalCommentValue.trim()) {
-                      handleAddGlobalComment();
-                    }
-                  }
-                }}
-              />
-              <button
-                type="submit"
-                disabled={!globalCommentValue.trim()}
-                className="self-start px-2 py-1.5 text-xs font-medium rounded bg-secondary text-secondary-foreground hover:opacity-90 disabled:opacity-50 transition-all"
-              >
-                Add
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowGlobalCommentInput(false);
-                  setGlobalCommentValue('');
-                }}
-                className="self-start p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-              >
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </form>
-          ) : (
-            <button
-              onClick={() => setShowGlobalCommentInput(true)}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-md transition-colors"
-              title="Add global comment"
-            >
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
-              </svg>
-              <span className="hidden md:inline">Global comment</span>
-            </button>
-          )}
+          {/* <span className="md:hidden">Comment</span><span className="hidden md:inline">Global comment</span> button */}
+          <button
+            ref={globalCommentButtonRef}
+            onClick={() => {
+              setViewerCommentPopover({
+                anchorEl: globalCommentButtonRef.current!,
+                contextText: '',
+                isGlobal: true,
+              });
+            }}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-md transition-colors"
+            title="Add global comment"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+            </svg>
+            <span className="md:hidden">Comment</span><span className="hidden md:inline">Global comment</span>
+          </button>
 
           {/* Copy plan/file button */}
           <button
             onClick={handleCopyPlan}
             className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-md transition-colors"
-            title={copied ? 'Copied!' : linkedDocInfo ? 'Copy file' : 'Copy plan'}
+            title={copied ? 'Copied!' : copyLabel || (linkedDocInfo ? 'Copy file' : 'Copy plan')}
           >
             {copied ? (
               <>
                 <svg className="w-3.5 h-3.5 text-success" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                 </svg>
-                <span className="hidden md:inline">Copied!</span>
+                Copied!
               </>
             ) : (
               <>
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                 </svg>
-                <span className="hidden md:inline">{linkedDocInfo ? 'Copy file' : 'Copy plan'}</span>
+                <span className="md:hidden">Copy</span><span className="hidden md:inline">{copyLabel || (linkedDocInfo ? 'Copy file' : 'Copy plan')}</span>
               </>
             )}
           </button>
         </div>
-        {frontmatter && <FrontmatterCard frontmatter={frontmatter} />}
-        {blocks.map(block => (
-          block.type === 'code' && block.language === 'mermaid' ? (
-            <MermaidBlock key={block.id} block={block} />
-          ) : block.type === 'code' ? (
+        {frontmatter && <><div className="clear-right md:hidden" /><FrontmatterCard frontmatter={frontmatter} /></>}
+        {!frontmatter && blocks.length > 0 && blocks[0].type !== 'heading' && <div className="mt-4" />}
+        {groupBlocks(blocks).map(group =>
+          group.type === 'list-group' ? (
+            <div key={group.key} data-pinpoint-group="list" className="py-1 -mx-2 px-2">
+              {group.blocks.map(block => (
+                <BlockRenderer imageBaseDir={imageBaseDir} onImageClick={(src, alt) => setLightbox({ src, alt })} key={block.id} block={block} onOpenLinkedDoc={onOpenLinkedDoc} />
+              ))}
+            </div>
+          ) : group.block.type === 'code' && isMermaidLanguage(group.block.language) ? (
+            <MermaidBlock key={group.block.id} block={group.block} />
+          ) : group.block.type === 'code' && isGraphvizLanguage(group.block.language) ? (
+            <GraphvizBlock key={group.block.id} block={group.block} />
+          ) : group.block.type === 'code' ? (
             <CodeBlock
-              key={block.id}
-              block={block}
-              onHover={(element) => {
+              key={group.block.id}
+              block={group.block}
+              onHover={inputMethod === 'pinpoint' ? () => {} : (element) => {
                 // Clear any pending leave timeout
                 if (hoverTimeoutRef.current) {
                   clearTimeout(hoverTimeoutRef.current);
@@ -827,10 +593,10 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 setIsCodeBlockToolbarExiting(false);
                 // Only show hover toolbar if no selection toolbar is active
                 if (!toolbarState) {
-                  setHoveredCodeBlock({ block, element });
+                  setHoveredCodeBlock({ block: group.block, element });
                 }
               }}
-              onLeave={() => {
+              onLeave={inputMethod === 'pinpoint' ? () => {} : () => {
                 // Delay then start exit animation
                 hoverTimeoutRef.current = setTimeout(() => {
                   setIsCodeBlockToolbarExiting(true);
@@ -841,34 +607,39 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                   }, 150);
                 }, 100);
               }}
-              isHovered={hoveredCodeBlock?.block.id === block.id}
+              isHovered={inputMethod !== 'pinpoint' && hoveredCodeBlock?.block.id === group.block.id}
             />
           ) : (
-            <BlockRenderer key={block.id} block={block} onOpenLinkedDoc={onOpenLinkedDoc} />
+            <BlockRenderer imageBaseDir={imageBaseDir} onImageClick={(src, alt) => setLightbox({ src, alt })} key={group.block.id} block={group.block} onOpenLinkedDoc={onOpenLinkedDoc} />
           )
-        ))}
+        )}
 
         {/* Text selection toolbar */}
         {toolbarState && (
-          <AnnotationToolbar
-            element={toolbarState.element}
-            positionMode="center-above"
-            onAnnotate={handleAnnotate}
-            onClose={handleToolbarClose}
-            copyText={toolbarState.selectionText}
-            closeOnScrollOut
-            initialStep={toolbarState.initialStep}
-            initialType={toolbarState.initialType}
-          />
+          <ToolbarErrorBoundary>
+            <AnnotationToolbar
+              element={toolbarState.element}
+              positionMode="center-above"
+              onAnnotate={handleAnnotate}
+              onClose={handleToolbarClose}
+              onRequestComment={handleRequestComment}
+              onQuickLabel={handleQuickLabel}
+              copyText={toolbarState.selectionText}
+              closeOnScrollOut
+            />
+          </ToolbarErrorBoundary>
         )}
 
         {/* Code block hover toolbar */}
         {hoveredCodeBlock && !toolbarState && (
+          <ToolbarErrorBoundary>
           <AnnotationToolbar
             element={hoveredCodeBlock.element}
             positionMode="top-right"
             onAnnotate={handleCodeBlockAnnotate}
             onClose={handleCodeBlockToolbarClose}
+            onRequestComment={handleCodeBlockRequestComment}
+            onQuickLabel={handleCodeBlockQuickLabel}
             isExiting={isCodeBlockToolbarExiting}
             onMouseEnter={() => {
               if (hoverTimeoutRef.current) {
@@ -878,8 +649,6 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               setIsCodeBlockToolbarExiting(false);
             }}
             onMouseLeave={() => {
-              // Don't close if toolbar is locked (in input mode)
-              if (isCodeBlockToolbarLocked) return;
               hoverTimeoutRef.current = setTimeout(() => {
                 setIsCodeBlockToolbarExiting(true);
                 setTimeout(() => {
@@ -888,18 +657,109 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 }, 150);
               }, 100);
             }}
-            onLockChange={setIsCodeBlockToolbarLocked}
+          />
+          </ToolbarErrorBoundary>
+        )}
+
+        {/* Pinpoint hover overlay */}
+        {inputMethod === 'pinpoint' && (
+          <PinpointOverlay target={hoverTarget} containerRef={containerRef} />
+        )}
+
+        {/* Comment popover — hook handles text selection, Viewer handles global + code block */}
+        {hookCommentPopover && (
+          <CommentPopover
+            anchorEl={hookCommentPopover.anchorEl}
+            contextText={hookCommentPopover.contextText}
+            isGlobal={false}
+            initialText={hookCommentPopover.initialText}
+            onSubmit={hookCommentSubmit}
+            onClose={hookCommentClose}
+          />
+        )}
+        {viewerCommentPopover && (
+          <CommentPopover
+            anchorEl={viewerCommentPopover.anchorEl}
+            contextText={viewerCommentPopover.contextText}
+            isGlobal={viewerCommentPopover.isGlobal}
+            initialText={viewerCommentPopover.initialText}
+            onSubmit={handleViewerCommentSubmit}
+            onClose={handleViewerCommentClose}
+          />
+        )}
+
+        {/* Quick Label floating picker — hook handles text selection, Viewer handles code blocks */}
+        {hookQuickLabelPicker && (
+          <FloatingQuickLabelPicker
+            anchorEl={hookQuickLabelPicker.anchorEl}
+            cursorHint={hookQuickLabelPicker.cursorHint}
+            onSelect={hookFloatingQuickLabel}
+            onDismiss={hookQuickLabelPickerDismiss}
+          />
+        )}
+        {codeBlockQuickLabelPicker && (
+          <FloatingQuickLabelPicker
+            anchorEl={codeBlockQuickLabelPicker.anchorEl}
+            onSelect={(label: QuickLabel) => {
+              const codeEl = codeBlockQuickLabelPicker.codeBlock.element.querySelector('code');
+              if (codeEl) {
+                applyCodeBlockAnnotation(
+                  codeBlockQuickLabelPicker.codeBlock.block.id, codeEl, AnnotationType.COMMENT,
+                  `${label.emoji} ${label.text}`, undefined, true, label.tip
+                );
+              }
+              setCodeBlockQuickLabelPicker(null);
+              window.getSelection()?.removeAllRanges();
+            }}
+            onDismiss={() => {
+              setCodeBlockQuickLabelPicker(null);
+              window.getSelection()?.removeAllRanges();
+            }}
           />
         )}
       </article>
+
+      {/* Image lightbox */}
+      {lightbox && createPortal(
+        <ImageLightbox src={lightbox.src} alt={lightbox.alt} onClose={() => setLightbox(null)} />,
+        document.body
+      )}
     </div>
   );
 });
 
+/** Simple lightbox overlay for enlarged image viewing. */
+const ImageLightbox: React.FC<{ src: string; alt: string; onClose: () => void }> = ({ src, alt, onClose }) => {
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-[200] flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm cursor-zoom-out"
+      onClick={onClose}
+    >
+      <img
+        src={src}
+        alt={alt}
+        className="max-w-[90vw] max-h-[85vh] object-contain rounded-lg shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      />
+      {alt && (
+        <div className="mt-3 text-sm text-white/70 max-w-[90vw] text-center truncate">{alt}</div>
+      )}
+    </div>
+  );
+};
+
 /**
  * Renders inline markdown: **bold**, *italic*, `code`, [links](url)
  */
-const InlineMarkdown: React.FC<{ text: string; onOpenLinkedDoc?: (path: string) => void }> = ({ text, onOpenLinkedDoc }) => {
+const InlineMarkdown: React.FC<{ text: string; onOpenLinkedDoc?: (path: string) => void; imageBaseDir?: string; onImageClick?: (src: string, alt: string) => void }> = ({ text, onOpenLinkedDoc, imageBaseDir, onImageClick }) => {
   const parts: React.ReactNode[] = [];
   let remaining = text;
   let key = 0;
@@ -908,7 +768,7 @@ const InlineMarkdown: React.FC<{ text: string; onOpenLinkedDoc?: (path: string) 
     // Bold: **text**
     let match = remaining.match(/^\*\*(.+?)\*\*/);
     if (match) {
-      parts.push(<strong key={key++} className="font-semibold">{match[1]}</strong>);
+      parts.push(<strong key={key++} className="font-semibold"><InlineMarkdown imageBaseDir={imageBaseDir} onImageClick={onImageClick} text={match[1]} onOpenLinkedDoc={onOpenLinkedDoc} /></strong>);
       remaining = remaining.slice(match[0].length);
       continue;
     }
@@ -916,7 +776,7 @@ const InlineMarkdown: React.FC<{ text: string; onOpenLinkedDoc?: (path: string) 
     // Italic: *text*
     match = remaining.match(/^\*(.+?)\*/);
     if (match) {
-      parts.push(<em key={key++}>{match[1]}</em>);
+      parts.push(<em key={key++}><InlineMarkdown imageBaseDir={imageBaseDir} onImageClick={onImageClick} text={match[1]} onOpenLinkedDoc={onOpenLinkedDoc} /></em>);
       remaining = remaining.slice(match[0].length);
       continue;
     }
@@ -963,6 +823,26 @@ const InlineMarkdown: React.FC<{ text: string; onOpenLinkedDoc?: (path: string) 
           <span key={key++} className="text-primary">{display}</span>
         );
       }
+      remaining = remaining.slice(match[0].length);
+      continue;
+    }
+
+    // Images: ![alt](path)
+    match = remaining.match(/^!\[([^\]]*)\]\(([^)]+)\)/);
+    if (match) {
+      const alt = match[1];
+      const src = match[2];
+      const imgSrc = /^https?:\/\//.test(src) ? src : getImageSrc(src, imageBaseDir);
+      parts.push(
+        <img
+          key={key++}
+          src={imgSrc}
+          alt={alt}
+          className="max-w-full rounded my-2 cursor-zoom-in"
+          loading="lazy"
+          onClick={(e) => { e.stopPropagation(); onImageClick?.(imgSrc, alt); }}
+        />
+      );
       remaining = remaining.slice(match[0].length);
       continue;
     }
@@ -1023,7 +903,7 @@ const InlineMarkdown: React.FC<{ text: string; onOpenLinkedDoc?: (path: string) 
     }
 
     // Find next special character or consume one regular character
-    const nextSpecial = remaining.slice(1).search(/[\*`\[]/);
+    const nextSpecial = remaining.slice(1).search(/[\*`\[!]/);
     if (nextSpecial === -1) {
       parts.push(remaining);
       break;
@@ -1063,7 +943,31 @@ const parseTableContent = (content: string): { headers: string[]; rows: string[]
   return { headers, rows };
 };
 
-const BlockRenderer: React.FC<{ block: Block; onOpenLinkedDoc?: (path: string) => void }> = ({ block, onOpenLinkedDoc }) => {
+/** Groups consecutive list-item blocks so they can share a pinpoint hover wrapper. */
+type RenderGroup =
+  | { type: 'single'; block: Block }
+  | { type: 'list-group'; blocks: Block[]; key: string };
+
+function groupBlocks(blocks: Block[]): RenderGroup[] {
+  const groups: RenderGroup[] = [];
+  let i = 0;
+  while (i < blocks.length) {
+    if (blocks[i].type === 'list-item') {
+      const listBlocks: Block[] = [];
+      while (i < blocks.length && blocks[i].type === 'list-item') {
+        listBlocks.push(blocks[i]);
+        i++;
+      }
+      groups.push({ type: 'list-group', blocks: listBlocks, key: `list-${listBlocks[0].id}` });
+    } else {
+      groups.push({ type: 'single', block: blocks[i] });
+      i++;
+    }
+  }
+  return groups;
+}
+
+const BlockRenderer: React.FC<{ block: Block; onOpenLinkedDoc?: (path: string) => void; imageBaseDir?: string; onImageClick?: (src: string, alt: string) => void }> = ({ block, onOpenLinkedDoc, imageBaseDir, onImageClick }) => {
   switch (block.type) {
     case 'heading':
       const Tag = `h${block.level || 1}` as keyof JSX.IntrinsicElements;
@@ -1073,7 +977,7 @@ const BlockRenderer: React.FC<{ block: Block; onOpenLinkedDoc?: (path: string) =
         3: 'text-base font-semibold mb-2 mt-6 text-foreground/80',
       }[block.level || 1] || 'text-base font-semibold mb-2 mt-4';
 
-      return <Tag className={styles} data-block-id={block.id} data-block-type="heading"><InlineMarkdown text={block.content} onOpenLinkedDoc={onOpenLinkedDoc} /></Tag>;
+      return <Tag className={styles} data-block-id={block.id} data-block-type="heading"><InlineMarkdown imageBaseDir={imageBaseDir} onImageClick={onImageClick} text={block.content} onOpenLinkedDoc={onOpenLinkedDoc} /></Tag>;
 
     case 'blockquote':
       return (
@@ -1081,7 +985,7 @@ const BlockRenderer: React.FC<{ block: Block; onOpenLinkedDoc?: (path: string) =
           className="border-l-2 border-primary/50 pl-4 my-4 text-muted-foreground italic"
           data-block-id={block.id}
         >
-          <InlineMarkdown text={block.content} onOpenLinkedDoc={onOpenLinkedDoc} />
+          <InlineMarkdown imageBaseDir={imageBaseDir} onImageClick={onImageClick} text={block.content} onOpenLinkedDoc={onOpenLinkedDoc} />
         </blockquote>
       );
 
@@ -1112,14 +1016,14 @@ const BlockRenderer: React.FC<{ block: Block; onOpenLinkedDoc?: (path: string) =
             )}
           </span>
           <span className={`text-sm leading-relaxed ${isCheckbox && block.checked ? 'text-muted-foreground line-through' : 'text-foreground/90'}`}>
-            <InlineMarkdown text={block.content} onOpenLinkedDoc={onOpenLinkedDoc} />
+            <InlineMarkdown imageBaseDir={imageBaseDir} onImageClick={onImageClick} text={block.content} onOpenLinkedDoc={onOpenLinkedDoc} />
           </span>
         </div>
       );
     }
 
     case 'code':
-      return <CodeBlock block={block} />;
+      return <CodeBlock block={block} onHover={() => {}} onLeave={() => {}} isHovered={false} />;
 
     case 'table': {
       const { headers, rows } = parseTableContent(block.content);
@@ -1133,7 +1037,7 @@ const BlockRenderer: React.FC<{ block: Block; onOpenLinkedDoc?: (path: string) =
                     key={i}
                     className="px-3 py-2 text-left font-semibold text-foreground/90 bg-muted/30"
                   >
-                    <InlineMarkdown text={header} onOpenLinkedDoc={onOpenLinkedDoc} />
+                    <InlineMarkdown imageBaseDir={imageBaseDir} onImageClick={onImageClick} text={header} onOpenLinkedDoc={onOpenLinkedDoc} />
                   </th>
                 ))}
               </tr>
@@ -1143,7 +1047,7 @@ const BlockRenderer: React.FC<{ block: Block; onOpenLinkedDoc?: (path: string) =
                 <tr key={rowIdx} className="border-b border-border/50 hover:bg-muted/20">
                   {row.map((cell, cellIdx) => (
                     <td key={cellIdx} className="px-3 py-2 text-foreground/80">
-                      <InlineMarkdown text={cell} onOpenLinkedDoc={onOpenLinkedDoc} />
+                      <InlineMarkdown imageBaseDir={imageBaseDir} onImageClick={onImageClick} text={cell} onOpenLinkedDoc={onOpenLinkedDoc} />
                     </td>
                   ))}
                 </tr>
@@ -1163,7 +1067,7 @@ const BlockRenderer: React.FC<{ block: Block; onOpenLinkedDoc?: (path: string) =
           className="mb-4 leading-relaxed text-foreground/90 text-[15px]"
           data-block-id={block.id}
         >
-          <InlineMarkdown text={block.content} onOpenLinkedDoc={onOpenLinkedDoc} />
+          <InlineMarkdown imageBaseDir={imageBaseDir} onImageClick={onImageClick} text={block.content} onOpenLinkedDoc={onOpenLinkedDoc} />
         </p>
       );
   }
@@ -1239,4 +1143,3 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ block, onHover, onLeave, isHovere
     </div>
   );
 };
-

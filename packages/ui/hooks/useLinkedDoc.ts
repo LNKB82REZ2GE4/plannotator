@@ -45,13 +45,15 @@ export interface UseLinkedDocReturn {
   /** Whether a fetch is in progress */
   isLoading: boolean;
   /** Open a linked document by path (saves plan state, fetches doc, swaps) */
-  open: (docPath: string, buildUrl?: (path: string) => string) => Promise<void>;
+  open: (docPath: string, buildUrl?: (path: string) => string, targetTab?: string) => Promise<void>;
   /** Return to the plan (caches doc annotations, restores plan state) */
   back: () => void;
   /** Dismiss the current error */
   dismissError: () => void;
   /** All linked doc annotations including the active doc's live state (keyed by filepath) */
   getDocAnnotations: () => Map<string, CachedDocState>;
+  /** Reactive count of cached linked doc annotations (updates on back()) */
+  docAnnotationCount: number;
 }
 
 const HIGHLIGHT_REAPPLY_DELAY = 100;
@@ -73,6 +75,7 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
   const [linkedDoc, setLinkedDoc] = useState<{ filepath: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [docAnnotationCount, setDocAnnotationCount] = useState(0);
 
   // Stash plan state when navigating to a linked doc
   const savedPlanState = useRef<SavedPlanState | null>(null);
@@ -86,7 +89,7 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
   );
 
   const open = useCallback(
-    async (docPath: string, buildUrl?: (path: string) => string) => {
+    async (docPath: string, buildUrl?: (path: string) => string, targetTab?: string) => {
       setIsLoading(true);
       setError(null);
 
@@ -133,7 +136,7 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
         setGlobalAttachments(cached?.globalAttachments ?? []);
         setSelectedAnnotationId(null);
         setLinkedDoc({ filepath: data.filepath! });
-        sidebar.open("toc");
+        sidebar.open(targetTab ?? "toc");
 
         // Re-apply cached annotations after DOM settles
         if (cached?.annotations.length) {
@@ -175,6 +178,12 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
         annotations: [...annotations],
         globalAttachments: [...globalAttachments],
       });
+      // Update reactive count so button labels can respond
+      let total = 0;
+      for (const cached of docCache.current.values()) {
+        total += cached.annotations.length + cached.globalAttachments.length;
+      }
+      setDocAnnotationCount(total);
     }
 
     // Restore plan state
@@ -227,5 +236,6 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
     back,
     dismissError,
     getDocAnnotations,
+    docAnnotationCount,
   };
 }

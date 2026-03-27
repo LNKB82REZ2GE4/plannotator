@@ -82,30 +82,104 @@ if ($userPath -notlike "*$installDir*") {
     Write-Host "Added to PATH. Restart your terminal for changes to take effect."
 }
 
+# Validate plugin hooks.json if plugin is already installed
+$pluginHooks = if ($env:CLAUDE_CONFIG_DIR) { "$env:CLAUDE_CONFIG_DIR\plugins\marketplaces\plannotator\apps\hook\hooks\hooks.json" } else { "$env:USERPROFILE\.claude\plugins\marketplaces\plannotator\apps\hook\hooks\hooks.json" }
+if (Test-Path $pluginHooks) {
+    # Use full path on Windows so the hook works without PATH being set in the shell
+    $exePath = "$installDir\plannotator.exe"
+    # Convert backslashes to forward slashes and escape for JSON
+    $exePathJson = $exePath.Replace('\', '/')
+    @"
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$exePathJson",
+            "timeout": 345600
+          }
+        ]
+      }
+    ]
+  }
+}
+"@ | Set-Content -Path $pluginHooks
+    Write-Host "Updated plugin hooks at $pluginHooks"
+}
+
 # Clear OpenCode plugin cache
 Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\opencode\node_modules\@plannotator" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "$env:USERPROFILE\.bun\install\cache\@plannotator" -ErrorAction SilentlyContinue
+
+# Clear Pi jiti cache to force fresh download on next run
+Remove-Item -Recurse -Force "$env:TEMP\jiti" -ErrorAction SilentlyContinue
+
+# Update Pi extension if pi is installed
+if (Get-Command pi -ErrorAction SilentlyContinue) {
+    Write-Host "Updating Pi extension..."
+    pi install npm:@plannotator/pi-extension
+    Write-Host "Pi extension updated."
+}
 
 # Install Claude Code slash command
 $claudeCommandsDir = if ($env:CLAUDE_CONFIG_DIR) { "$env:CLAUDE_CONFIG_DIR\commands" } else { "$env:USERPROFILE\.claude\commands" }
 New-Item -ItemType Directory -Force -Path $claudeCommandsDir | Out-Null
 
-@"
+@'
 ---
-description: Open interactive code review for current changes
+description: Open interactive code review for current changes or a PR URL
 allowed-tools: Bash(plannotator:*)
 ---
 
 ## Code Review Feedback
 
-!`plannotator review`
+!`plannotator review $ARGUMENTS`
 
 ## Your task
 
-Address the code review feedback above. The user has reviewed your changes in the Plannotator UI and provided specific annotations and comments.
-"@ | Set-Content -Path "$claudeCommandsDir\plannotator-review.md"
+If the review above contains feedback or annotations, address them. If no changes were requested, acknowledge and continue.
+'@ | Set-Content -Path "$claudeCommandsDir\plannotator-review.md"
 
 Write-Host "Installed /plannotator-review command to $claudeCommandsDir\plannotator-review.md"
+
+# Install Claude Code /annotate slash command
+@'
+---
+description: Open interactive annotation UI for a markdown file
+allowed-tools: Bash(plannotator:*)
+---
+
+## Markdown Annotations
+
+!`plannotator annotate $ARGUMENTS`
+
+## Your task
+
+Address the annotation feedback above. The user has reviewed the markdown file and provided specific annotations and comments.
+'@ | Set-Content -Path "$claudeCommandsDir\plannotator-annotate.md"
+
+Write-Host "Installed /plannotator-annotate command to $claudeCommandsDir\plannotator-annotate.md"
+
+# Install Claude Code /plannotator-last slash command
+@'
+---
+description: Annotate the last rendered assistant message
+allowed-tools: Bash(plannotator:*)
+---
+
+## Message Annotations
+
+!`plannotator annotate-last`
+
+## Your task
+
+Address the annotation feedback above. The user has reviewed your last message and provided specific annotations and comments.
+'@ | Set-Content -Path "$claudeCommandsDir\plannotator-last.md"
+
+Write-Host "Installed /plannotator-last command to $claudeCommandsDir\plannotator-last.md"
 
 # Install OpenCode slash command
 $opencodeCommandsDir = "$env:USERPROFILE\.config\opencode\command"
@@ -122,6 +196,60 @@ Acknowledge "Opening code review..." and wait for the user's feedback.
 
 Write-Host "Installed /plannotator-review command to $opencodeCommandsDir\plannotator-review.md"
 
+# Install OpenCode /annotate slash command
+@"
+---
+description: Open interactive annotation UI for a markdown file
+---
+
+The Plannotator Annotate has been triggered. Opening the annotation UI...
+Acknowledge "Opening annotation UI..." and wait for the user's feedback.
+"@ | Set-Content -Path "$opencodeCommandsDir\plannotator-annotate.md"
+
+Write-Host "Installed /plannotator-annotate command to $opencodeCommandsDir\plannotator-annotate.md"
+
+# Install OpenCode /plannotator-last slash command
+@"
+---
+description: Annotate the last assistant message
+---
+"@ | Set-Content -Path "$opencodeCommandsDir\plannotator-last.md"
+
+Write-Host "Installed /plannotator-last command to $opencodeCommandsDir\plannotator-last.md"
+
+# Install skills (requires git)
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    $claudeSkillsDir = if ($env:CLAUDE_CONFIG_DIR) { "$env:CLAUDE_CONFIG_DIR\skills" } else { "$env:USERPROFILE\.claude\skills" }
+    $agentsSkillsDir = if ($env:XDG_CONFIG_HOME) { "$env:XDG_CONFIG_HOME\agents\skills" } else { "$env:USERPROFILE\.config\agents\skills" }
+    $skillsTmp = Join-Path ([System.IO.Path]::GetTempPath()) "plannotator-skills-$(Get-Random)"
+    New-Item -ItemType Directory -Force -Path $skillsTmp | Out-Null
+
+    try {
+        git clone --depth 1 --filter=blob:none --sparse "https://github.com/$repo.git" --branch $latestTag "$skillsTmp\repo" 2>$null
+        Push-Location "$skillsTmp\repo"
+        git sparse-checkout set apps/skills 2>$null
+
+        if (Test-Path "apps\skills") {
+            $items = Get-ChildItem "apps\skills" -ErrorAction SilentlyContinue
+            if ($items) {
+                New-Item -ItemType Directory -Force -Path $claudeSkillsDir | Out-Null
+                New-Item -ItemType Directory -Force -Path $agentsSkillsDir | Out-Null
+                Copy-Item -Recurse -Force "apps\skills\*" $claudeSkillsDir
+                Copy-Item -Recurse -Force "apps\skills\*" $agentsSkillsDir
+                Write-Host "Installed skills to $claudeSkillsDir\ and $agentsSkillsDir\"
+            }
+        }
+
+        Pop-Location
+    } catch {
+        Write-Host "Skipping skills install (git sparse-checkout failed)"
+    }
+
+    Remove-Item -Recurse -Force $skillsTmp -ErrorAction SilentlyContinue
+} else {
+    Write-Host "Skipping skills install (git not found)"
+}
+
 Write-Host ""
 Write-Host "=========================================="
 Write-Host "  OPENCODE USERS"
@@ -131,7 +259,15 @@ Write-Host "Add the plugin to your opencode.json:"
 Write-Host ""
 Write-Host '  "plugin": ["@plannotator/opencode@latest"]'
 Write-Host ""
-Write-Host "Then restart OpenCode. The /plannotator-review command is ready!"
+Write-Host "Then restart OpenCode. The /plannotator-review, /plannotator-annotate, and /plannotator-last commands are ready!"
+Write-Host ""
+Write-Host "=========================================="
+Write-Host "  PI USERS"
+Write-Host "=========================================="
+Write-Host ""
+Write-Host "Install or update the extension:"
+Write-Host ""
+Write-Host "  pi install npm:@plannotator/pi-extension"
 Write-Host ""
 Write-Host "=========================================="
 Write-Host "  CLAUDE CODE USERS: YOU ARE ALL SET!"
@@ -141,4 +277,24 @@ Write-Host "Install the Claude Code plugin:"
 Write-Host "  /plugin marketplace add backnotprop/plannotator"
 Write-Host "  /plugin install plannotator@plannotator"
 Write-Host ""
-Write-Host "The /plannotator-review command is ready to use after you restart Claude Code!"
+Write-Host "The /plannotator-review, /plannotator-annotate, and /plannotator-last commands are ready to use after you restart Claude Code!"
+
+# Warn if plannotator is configured in both settings.json hooks AND the plugin (causes double execution)
+# Only warn when the plugin is installed — manual-only users won't have overlap
+$claudeSettings = if ($env:CLAUDE_CONFIG_DIR) { "$env:CLAUDE_CONFIG_DIR\settings.json" } else { "$env:USERPROFILE\.claude\settings.json" }
+if ((Test-Path $pluginHooks) -and (Test-Path $claudeSettings)) {
+    $settingsContent = Get-Content -Path $claudeSettings -Raw -ErrorAction SilentlyContinue
+    if ($settingsContent -match '"command".*plannotator') {
+        Write-Host ""
+        Write-Host "⚠️ ⚠️ ⚠️  WARNING: DUPLICATE HOOK DETECTED  ⚠️ ⚠️ ⚠️"
+        Write-Host ""
+        Write-Host "  plannotator was found in your settings.json hooks:"
+        Write-Host "  $claudeSettings"
+        Write-Host ""
+        Write-Host "  This will cause plannotator to run TWICE on each plan review."
+        Write-Host "  Remove the plannotator hook from settings.json and rely on the"
+        Write-Host "  plugin instead (installed automatically via marketplace)."
+        Write-Host ""
+        Write-Host "⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️"
+    }
+}

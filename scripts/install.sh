@@ -83,8 +83,42 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
     echo "  source ${shell_config}"
 fi
 
+# Validate plugin hooks.json if plugin is already installed
+PLUGIN_HOOKS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/marketplaces/plannotator/apps/hook/hooks/hooks.json"
+if [ -f "$PLUGIN_HOOKS" ]; then
+    cat > "$PLUGIN_HOOKS" << 'HOOKS_EOF'
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "plannotator",
+            "timeout": 345600
+          }
+        ]
+      }
+    ]
+  }
+}
+HOOKS_EOF
+    echo "Updated plugin hooks at ${PLUGIN_HOOKS}"
+fi
+
 # Clear any cached OpenCode plugin to force fresh download on next run
 rm -rf "$HOME/.cache/opencode/node_modules/@plannotator" "$HOME/.bun/install/cache/@plannotator" 2>/dev/null || true
+
+# Clear Pi jiti cache to force fresh download on next run
+rm -rf /tmp/jiti 2>/dev/null || true
+
+# Update Pi extension if pi is installed
+if command -v pi &>/dev/null; then
+    echo "Updating Pi extension..."
+    pi install npm:@plannotator/pi-extension
+    echo "Pi extension updated."
+fi
 
 # Install /review slash command
 CLAUDE_COMMANDS_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/commands"
@@ -92,20 +126,56 @@ mkdir -p "$CLAUDE_COMMANDS_DIR"
 
 cat > "$CLAUDE_COMMANDS_DIR/plannotator-review.md" << 'COMMAND_EOF'
 ---
-description: Open interactive code review for current changes
+description: Open interactive code review for current changes or a PR URL
 allowed-tools: Bash(plannotator:*)
 ---
 
 ## Code Review Feedback
 
-!`plannotator review`
+!`plannotator review $ARGUMENTS`
 
 ## Your task
 
-Address the code review feedback above. The user has reviewed your changes in the Plannotator UI and provided specific annotations and comments.
+If the review above contains feedback or annotations, address them. If no changes were requested, acknowledge and continue.
 COMMAND_EOF
 
 echo "Installed /plannotator-review command to ${CLAUDE_COMMANDS_DIR}/plannotator-review.md"
+
+# Install /annotate slash command for Claude Code
+cat > "$CLAUDE_COMMANDS_DIR/plannotator-annotate.md" << 'COMMAND_EOF'
+---
+description: Open interactive annotation UI for a markdown file
+allowed-tools: Bash(plannotator:*)
+---
+
+## Markdown Annotations
+
+!`plannotator annotate $ARGUMENTS`
+
+## Your task
+
+Address the annotation feedback above. The user has reviewed the markdown file and provided specific annotations and comments.
+COMMAND_EOF
+
+echo "Installed /plannotator-annotate command to ${CLAUDE_COMMANDS_DIR}/plannotator-annotate.md"
+
+# Install /plannotator-last slash command for Claude Code
+cat > "$CLAUDE_COMMANDS_DIR/plannotator-last.md" << 'COMMAND_EOF'
+---
+description: Annotate the last rendered assistant message
+allowed-tools: Bash(plannotator:*)
+---
+
+## Message Annotations
+
+!`plannotator annotate-last`
+
+## Your task
+
+Address the annotation feedback above. The user has reviewed your last message and provided specific annotations and comments.
+COMMAND_EOF
+
+echo "Installed /plannotator-last command to ${CLAUDE_COMMANDS_DIR}/plannotator-last.md"
 
 # Install OpenCode slash command
 OPENCODE_COMMANDS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/command"
@@ -122,6 +192,54 @@ COMMAND_EOF
 
 echo "Installed /plannotator-review command to ${OPENCODE_COMMANDS_DIR}/plannotator-review.md"
 
+# Install /annotate slash command for OpenCode
+cat > "$OPENCODE_COMMANDS_DIR/plannotator-annotate.md" << 'COMMAND_EOF'
+---
+description: Open interactive annotation UI for a markdown file
+---
+
+The Plannotator Annotate has been triggered. Opening the annotation UI...
+Acknowledge "Opening annotation UI..." and wait for the user's feedback.
+COMMAND_EOF
+
+echo "Installed /plannotator-annotate command to ${OPENCODE_COMMANDS_DIR}/plannotator-annotate.md"
+
+# Install /plannotator-last slash command for OpenCode
+cat > "$OPENCODE_COMMANDS_DIR/plannotator-last.md" << 'COMMAND_EOF'
+---
+description: Annotate the last assistant message
+---
+COMMAND_EOF
+
+echo "Installed /plannotator-last command to ${OPENCODE_COMMANDS_DIR}/plannotator-last.md"
+
+# Install skills (requires git)
+if command -v git &>/dev/null; then
+    CLAUDE_SKILLS_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills"
+    AGENTS_SKILLS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/agents/skills"
+    skills_tmp=$(mktemp -d)
+
+    if git clone --depth 1 --filter=blob:none --sparse \
+        "https://github.com/${REPO}.git" --branch "$latest_tag" "$skills_tmp/repo" 2>/dev/null && \
+        cd "$skills_tmp/repo" && git sparse-checkout set apps/skills 2>/dev/null; then
+
+        if [ -d "apps/skills" ] && [ "$(ls -A apps/skills 2>/dev/null)" ]; then
+            mkdir -p "$CLAUDE_SKILLS_DIR" "$AGENTS_SKILLS_DIR"
+            cp -r apps/skills/* "$CLAUDE_SKILLS_DIR/"
+            cp -r apps/skills/* "$AGENTS_SKILLS_DIR/"
+            echo "Installed skills to ${CLAUDE_SKILLS_DIR}/ and ${AGENTS_SKILLS_DIR}/"
+        fi
+
+        cd - >/dev/null
+    else
+        echo "Skipping skills install (git sparse-checkout failed)"
+    fi
+
+    rm -rf "$skills_tmp"
+else
+    echo "Skipping skills install (git not found)"
+fi
+
 echo ""
 echo "=========================================="
 echo "  OPENCODE USERS"
@@ -131,7 +249,15 @@ echo "Add the plugin to your opencode.json:"
 echo ""
 echo '  "plugin": ["@plannotator/opencode@latest"]'
 echo ""
-echo "Then restart OpenCode. The /plannotator-review command is ready!"
+echo "Then restart OpenCode. The /plannotator-review, /plannotator-annotate, and /plannotator-last commands are ready!"
+echo ""
+echo "=========================================="
+echo "  PI USERS"
+echo "=========================================="
+echo ""
+echo "Install or update the extension:"
+echo ""
+echo "  pi install npm:@plannotator/pi-extension"
 echo ""
 echo "=========================================="
 echo "  CLAUDE CODE USERS: YOU'RE ALL SET!"
@@ -141,4 +267,21 @@ echo "Install the Claude Code plugin:"
 echo "  /plugin marketplace add backnotprop/plannotator"
 echo "  /plugin install plannotator@plannotator"
 echo ""
-echo "The /plannotator-review command is ready to use after you restart Claude Code!"
+echo "The /plannotator-review, /plannotator-annotate, and /plannotator-last commands are ready to use after you restart Claude Code!"
+
+# Warn if plannotator is configured in both settings.json hooks AND the plugin (causes double execution)
+# Only warn when the plugin is installed — manual-only users won't have overlap
+CLAUDE_SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+if [ -f "$PLUGIN_HOOKS" ] && [ -f "$CLAUDE_SETTINGS" ] && grep -q '"command".*plannotator' "$CLAUDE_SETTINGS" 2>/dev/null; then
+    echo ""
+    echo "⚠️ ⚠️ ⚠️  WARNING: DUPLICATE HOOK DETECTED  ⚠️ ⚠️ ⚠️"
+    echo ""
+    echo "  plannotator was found in your settings.json hooks:"
+    echo "  $CLAUDE_SETTINGS"
+    echo ""
+    echo "  This will cause plannotator to run TWICE on each plan review."
+    echo "  Remove the plannotator hook from settings.json and rely on the"
+    echo "  plugin instead (installed automatically via marketplace)."
+    echo ""
+    echo "⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️ ⚠️"
+fi

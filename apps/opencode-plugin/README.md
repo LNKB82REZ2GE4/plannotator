@@ -30,7 +30,7 @@ Add to your `opencode.json`:
 
 Restart OpenCode. The `submit_plan` tool is now available.
 
-> **Slash commands:** Run the install script to get `/plannotator-review`:
+> **Slash commands:** Run the install script to get `/plannotator-review`, `/plannotator-annotate`, and `/plannotator-last`:
 > ```bash
 > curl -fsSL https://plannotator.ai/install.sh | bash
 > ```
@@ -49,6 +49,7 @@ Restart OpenCode. The `submit_plan` tool is now available.
 - **Runs locally**: No network requests. Plans never leave your machine.
 - **Private sharing**: Plans and annotations compress into the URL itself—share a link, no accounts or backend required
 - **Plan Diff**: See what changed when the agent revises a plan after feedback
+- **Annotate last message**: Run `/plannotator-last` to annotate the agent's most recent response
 - **Obsidian integration**: Auto-save approved plans to your vault with frontmatter and tags
 
 ## Environment Variables
@@ -59,6 +60,7 @@ Restart OpenCode. The `submit_plan` tool is now available.
 | `PLANNOTATOR_PORT` | Fixed port to use. Default: random locally, `19432` for remote sessions. |
 | `PLANNOTATOR_BROWSER` | Custom browser to open plans in. macOS: app name or path. Linux/Windows: executable path. |
 | `PLANNOTATOR_SHARE_URL` | Custom share portal URL for self-hosting. Default: `https://share.plannotator.ai`. |
+| `PLANNOTATOR_PLAN_TIMEOUT_SECONDS` | Timeout for `submit_plan` review wait. Default: `345600` (96h). Set `0` to disable timeout. |
 
 ## Devcontainer / Docker
 

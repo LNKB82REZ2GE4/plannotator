@@ -15,6 +15,8 @@ const STORAGE_KEY_FOLDER = 'plannotator-obsidian-folder';
 const STORAGE_KEY_CUSTOM_PATH = 'plannotator-obsidian-custom-path';
 const STORAGE_KEY_FILENAME_FORMAT = 'plannotator-obsidian-filename-format';
 const STORAGE_KEY_VAULT_BROWSER = 'plannotator-obsidian-vault-browser';
+const STORAGE_KEY_AUTOSAVE = 'plannotator-obsidian-autosave';
+const STORAGE_KEY_FILENAME_SEPARATOR = 'plannotator-obsidian-filename-separator';
 
 // Sentinel value for custom path selection
 export const CUSTOM_PATH_SENTINEL = '__custom__';
@@ -28,12 +30,16 @@ export const DEFAULT_FILENAME_FORMAT = '{title} - {Mon} {D}, {YYYY} {h}-{mm}{amp
 /**
  * Obsidian integration settings
  */
+export type FilenameSeparator = 'space' | 'dash' | 'underscore';
+
 export interface ObsidianSettings {
   enabled: boolean;
   vaultPath: string;      // Selected vault path OR '__custom__' sentinel
   folder: string;
   customPath?: string;    // User-entered path when vaultPath === '__custom__'
   filenameFormat?: string; // Custom filename format (e.g. '{YYYY}-{MM}-{DD} - {title}')
+  filenameSeparator: FilenameSeparator; // Replace spaces in filename with dash/underscore
+  autoSave: boolean;      // Auto-save to Obsidian on plan arrival
   vaultBrowserEnabled: boolean; // Show vault file browser in sidebar
 }
 
@@ -47,6 +53,8 @@ export function getObsidianSettings(): ObsidianSettings {
     folder: storage.getItem(STORAGE_KEY_FOLDER) || DEFAULT_FOLDER,
     customPath: storage.getItem(STORAGE_KEY_CUSTOM_PATH) || undefined,
     filenameFormat: storage.getItem(STORAGE_KEY_FILENAME_FORMAT) || undefined,
+    filenameSeparator: (storage.getItem(STORAGE_KEY_FILENAME_SEPARATOR) as FilenameSeparator) || 'space',
+    autoSave: storage.getItem(STORAGE_KEY_AUTOSAVE) === 'true',
     vaultBrowserEnabled: storage.getItem(STORAGE_KEY_VAULT_BROWSER) === 'true',
   };
 }
@@ -60,6 +68,8 @@ export function saveObsidianSettings(settings: ObsidianSettings): void {
   storage.setItem(STORAGE_KEY_FOLDER, settings.folder);
   storage.setItem(STORAGE_KEY_CUSTOM_PATH, settings.customPath || '');
   storage.setItem(STORAGE_KEY_FILENAME_FORMAT, settings.filenameFormat || '');
+  storage.setItem(STORAGE_KEY_FILENAME_SEPARATOR, settings.filenameSeparator || 'space');
+  storage.setItem(STORAGE_KEY_AUTOSAVE, String(settings.autoSave));
   storage.setItem(STORAGE_KEY_VAULT_BROWSER, String(settings.vaultBrowserEnabled));
 }
 

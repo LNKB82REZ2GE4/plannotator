@@ -127,6 +127,44 @@ if !ERRORLEVEL! neq 0 (
     echo   set PATH=%%PATH%%;!INSTALL_DIR!
 )
 
+REM Validate plugin hooks.json if plugin is already installed
+if defined CLAUDE_CONFIG_DIR (
+    set "PLUGIN_HOOKS=%CLAUDE_CONFIG_DIR%\plugins\marketplaces\plannotator\apps\hook\hooks\hooks.json"
+) else (
+    set "PLUGIN_HOOKS=%USERPROFILE%\.claude\plugins\marketplaces\plannotator\apps\hook\hooks\hooks.json"
+)
+if exist "!PLUGIN_HOOKS!" (
+    REM Use full path so the hook works without PATH being set in the shell
+    set "EXE_PATH=!INSTALL_PATH:\=/!"
+    (
+echo {
+echo   "hooks": {
+echo     "PermissionRequest": [
+echo       {
+echo         "matcher": "ExitPlanMode",
+echo         "hooks": [
+echo           {
+echo             "type": "command",
+echo             "command": "!EXE_PATH!",
+echo             "timeout": 345600
+echo           }
+echo         ]
+echo       }
+echo     ]
+echo   }
+echo }
+    ) > "!PLUGIN_HOOKS!"
+    echo Updated plugin hooks at !PLUGIN_HOOKS!
+)
+
+REM Update Pi extension if pi is installed
+where pi >nul 2>&1
+if !ERRORLEVEL! equ 0 (
+    echo Updating Pi extension...
+    pi install npm:@plannotator/pi-extension
+    echo Pi extension updated.
+)
+
 REM Install /review slash command
 if defined CLAUDE_CONFIG_DIR (
     set "CLAUDE_COMMANDS_DIR=%CLAUDE_CONFIG_DIR%\commands"
@@ -137,20 +175,93 @@ if not exist "!CLAUDE_COMMANDS_DIR!" mkdir "!CLAUDE_COMMANDS_DIR!"
 
 (
 echo ---
-echo description: Open interactive code review for current changes
+echo description: Open interactive code review for current changes or a PR URL
 echo allowed-tools: Bash^(plannotator:*^)
 echo ---
 echo.
 echo ## Code Review Feedback
 echo.
-echo !`plannotator review`
+echo !`plannotator review $ARGUMENTS`
 echo.
 echo ## Your task
 echo.
-echo Address the code review feedback above. The user has reviewed your changes in the Plannotator UI and provided specific annotations and comments.
+echo If the review above contains feedback or annotations, address them. If no changes were requested, acknowledge and continue.
 ) > "!CLAUDE_COMMANDS_DIR!\plannotator-review.md"
 
 echo Installed /plannotator-review command to !CLAUDE_COMMANDS_DIR!\plannotator-review.md
+
+(
+echo ---
+echo description: Open interactive annotation UI for a markdown file
+echo allowed-tools: Bash^(plannotator:*^)
+echo ---
+echo.
+echo ## Markdown Annotations
+echo.
+echo !`plannotator annotate $ARGUMENTS`
+echo.
+echo ## Your task
+echo.
+echo Address the annotation feedback above. The user has reviewed the markdown file and provided specific annotations and comments.
+) > "!CLAUDE_COMMANDS_DIR!\plannotator-annotate.md"
+
+echo Installed /plannotator-annotate command to !CLAUDE_COMMANDS_DIR!\plannotator-annotate.md
+
+(
+echo ---
+echo description: Annotate the last rendered assistant message
+echo allowed-tools: Bash^(plannotator:*^)
+echo ---
+echo.
+echo ## Message Annotations
+echo.
+echo !`plannotator annotate-last`
+echo.
+echo ## Your task
+echo.
+echo Address the annotation feedback above. The user has reviewed your last message and provided specific annotations and comments.
+) > "!CLAUDE_COMMANDS_DIR!\plannotator-last.md"
+
+echo Installed /plannotator-last command to !CLAUDE_COMMANDS_DIR!\plannotator-last.md
+
+REM Install skills (requires git)
+where git >nul 2>&1
+if !ERRORLEVEL! equ 0 (
+    if defined CLAUDE_CONFIG_DIR (
+        set "CLAUDE_SKILLS_DIR=%CLAUDE_CONFIG_DIR%\skills"
+    ) else (
+        set "CLAUDE_SKILLS_DIR=%USERPROFILE%\.claude\skills"
+    )
+    if defined XDG_CONFIG_HOME (
+        set "AGENTS_SKILLS_DIR=%XDG_CONFIG_HOME%\agents\skills"
+    ) else (
+        set "AGENTS_SKILLS_DIR=%USERPROFILE%\.config\agents\skills"
+    )
+    set "SKILLS_TMP=%TEMP%\plannotator-skills-%RANDOM%"
+    mkdir "!SKILLS_TMP!" >nul 2>&1
+
+    git clone --depth 1 --filter=blob:none --sparse "https://github.com/!REPO!.git" --branch "!TAG!" "!SKILLS_TMP!\repo" >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        pushd "!SKILLS_TMP!\repo"
+        git sparse-checkout set apps/skills >nul 2>&1
+
+        if exist "apps\skills" (
+            if not exist "!CLAUDE_SKILLS_DIR!" mkdir "!CLAUDE_SKILLS_DIR!"
+            if not exist "!AGENTS_SKILLS_DIR!" mkdir "!AGENTS_SKILLS_DIR!"
+            xcopy /s /y /q "apps\skills\*" "!CLAUDE_SKILLS_DIR!\" >nul 2>&1
+            xcopy /s /y /q "apps\skills\*" "!AGENTS_SKILLS_DIR!\" >nul 2>&1
+            echo Installed skills to !CLAUDE_SKILLS_DIR!\ and !AGENTS_SKILLS_DIR!\
+        )
+
+        popd
+    ) else (
+        echo Skipping skills install ^(git sparse-checkout failed^)
+    )
+
+    rmdir /s /q "!SKILLS_TMP!" >nul 2>&1
+) else (
+    echo Skipping skills install ^(git not found^)
+)
 
 echo.
 echo Test the install:
@@ -160,6 +271,30 @@ echo Then install the Claude Code plugin:
 echo   /plugin marketplace add backnotprop/plannotator
 echo   /plugin install plannotator@plannotator
 echo.
-echo The /plannotator-review command is ready to use!
+echo The /plannotator-review, /plannotator-annotate, and /plannotator-last commands are ready to use!
+
+REM Warn if plannotator is configured in both settings.json hooks AND the plugin (causes double execution)
+REM Only warn when the plugin is installed — manual-only users won't have overlap
+if defined CLAUDE_CONFIG_DIR (
+    set "CLAUDE_SETTINGS=%CLAUDE_CONFIG_DIR%\settings.json"
+) else (
+    set "CLAUDE_SETTINGS=%USERPROFILE%\.claude\settings.json"
+)
+if exist "!PLUGIN_HOOKS!" if exist "!CLAUDE_SETTINGS!" (
+    findstr /r /c:"\"command\".*plannotator" "!CLAUDE_SETTINGS!" >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        echo.
+        echo WARNING: DUPLICATE HOOK DETECTED
+        echo.
+        echo   plannotator was found in your settings.json hooks:
+        echo   !CLAUDE_SETTINGS!
+        echo.
+        echo   This will cause plannotator to run TWICE on each plan review.
+        echo   Remove the plannotator hook from settings.json and rely on the
+        echo   plugin instead ^(installed automatically via marketplace^).
+        echo.
+    )
+)
+
 echo.
 exit /b 0

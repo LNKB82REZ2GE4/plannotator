@@ -201,6 +201,7 @@ export const ImageAnnotator: React.FC<ImageAnnotatorProps> = ({
   return (
     <div
       className="fixed inset-0 z-[200] flex items-center justify-center bg-background/90 backdrop-blur-sm"
+      data-popover-layer
       onClick={handleBackdropClick}
     >
       {/* Canvas with image and toolbar */}

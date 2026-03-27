@@ -1,6 +1,6 @@
 {
   "name": "plannotator",
-  "version": "0.10.0",
+  "version": "0.15.5",
   "private": true,
   "description": "Interactive Plan Review for Claude Code - annotate plans visually, share with team, automatically send feedback",
   "author": "backnotprop",
@@ -26,13 +26,24 @@
     "build:review": "bun run --cwd apps/review build",
     "build:pi": "bun run build:review && bun run build:hook && bun run --cwd apps/pi-extension build",
     "build": "bun run build:hook && bun run build:opencode",
-    "test": "bun test"
+    "dev:vscode": "bun run --cwd apps/vscode-extension watch",
+    "build:vscode": "bun run --cwd apps/vscode-extension build",
+    "package:vscode": "bun run --cwd apps/vscode-extension package",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p packages/shared/tsconfig.json && tsc --noEmit -p packages/ai/tsconfig.json && tsc --noEmit -p packages/server/tsconfig.json"
   },
   "dependencies": {
-    "@pierre/diffs": "^1.0.4",
-    "diff": "^8.0.3"
+    "@anthropic-ai/claude-agent-sdk": "^0.2.81",
+    "@openai/codex-sdk": "^0.116.0",
+    "@opencode-ai/sdk": "^1.3.0",
+    "@pierre/diffs": "^1.1.0-beta.19",
+    "diff": "^8.0.3",
+    "dompurify": "^3.3.3",
+    "marked": "^17.0.5"
   },
   "devDependencies": {
-    "happy-dom": "^20.5.0"
+    "@types/dompurify": "^3.2.0",
+    "@types/node": "^25.5.0",
+    "bun-types": "^1.3.11"
   }
 }

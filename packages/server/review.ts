@@ -10,14 +10,21 @@
  */
 
 import { isRemoteSession, getServerPort } from "./remote";
-import { type DiffType, type GitContext, runGitDiff } from "./git";
+import { type DiffType, type GitContext, runGitDiff, getFileContentsForDiff, gitAddFile, gitResetFile, parseWorktreeDiffType, validateFilePath } from "./git";
 import { getRepoInfo } from "./repo";
-import { handleImage, handleUpload, handleAgents, handleServerReady, type OpencodeClient } from "./shared-handlers";
+import { handleImage, handleUpload, handleAgents, handleServerReady, handleDraftSave, handleDraftLoad, handleDraftDelete, handleFavicon, type OpencodeClient } from "./shared-handlers";
+import { contentHash, deleteDraft } from "./draft";
+import { createEditorAnnotationHandler } from "./editor-annotations";
+import { saveConfig, detectGitUser, getServerConfig } from "./config";
+import { type PRMetadata, type PRReviewFileComment, fetchPRFileContent, fetchPRContext, submitPRReview, fetchPRViewedFiles, markPRFilesViewed, getPRUser, prRefFromMetadata, getDisplayRepo, getMRLabel, getMRNumberLabel } from "./pr";
+import { createAIEndpoints, ProviderRegistry, SessionManager, createProvider, type AIEndpoints, type PiSDKConfig } from "@plannotator/ai";
+import { isWSL } from "./browser";
 
 // Re-export utilities
 export { isRemoteSession, getServerPort } from "./remote";
 export { openBrowser } from "./browser";
-export { type DiffType, type DiffOption, type GitContext } from "./git";
+export { type DiffType, type DiffOption, type GitContext, type WorktreeInfo } from "./git";
+export { type PRMetadata } from "./pr";
 export { handleServerReady as handleReviewServerReady } from "./shared-handlers";
 
 // --- Types ---
@@ -32,7 +39,7 @@ export interface ReviewServerOptions {
   /** HTML content to serve for the UI */
   htmlContent: string;
   /** Origin identifier for UI customization */
-  origin?: "opencode" | "claude-code";
+  origin?: "opencode" | "claude-code" | "pi";
   /** Current diff type being displayed */
   diffType?: DiffType;
   /** Git context with branch info and available diff options */
@@ -45,6 +52,8 @@ export interface ReviewServerOptions {
   onReady?: (url: string, isRemote: boolean, port: number) => void;
   /** OpenCode client for querying available agents (OpenCode only) */
   opencodeClient?: OpencodeClient;
+  /** PR metadata when reviewing a pull request (PR mode) */
+  prMetadata?: PRMetadata;
 }
 
 export interface ReviewServerResult {
@@ -54,8 +63,9 @@ export interface ReviewServerResult {
   url: string;
   /** Whether running in remote mode */
   isRemote: boolean;
-  /** Wait for user feedback submission */
+  /** Wait for user review decision */
   waitForDecision: () => Promise<{
+    approved: boolean;
     feedback: string;
     annotations: unknown[];
     agentSwitch?: string;
@@ -80,7 +90,11 @@ const RETRY_DELAY_MS = 500;
 export async function startReviewServer(
   options: ReviewServerOptions
 ): Promise<ReviewServerResult> {
-  const { htmlContent, origin, gitContext, sharingEnabled = true, shareBaseUrl, onReady } = options;
+  const { htmlContent, origin, gitContext, sharingEnabled = true, shareBaseUrl, onReady, prMetadata } = options;
+
+  const isPRMode = !!prMetadata;
+  const draftKey = contentHash(options.rawPatch);
+  const editorAnnotations = createEditorAnnotationHandler();
 
   // Mutable state for diff switching
   let currentPatch = options.rawPatch;
@@ -88,19 +102,134 @@ export async function startReviewServer(
   let currentDiffType: DiffType = options.diffType || "uncommitted";
   let currentError = options.error;
 
+  // AI provider setup (graceful — AI features degrade if SDK unavailable)
+  const aiRegistry = new ProviderRegistry();
+  const aiSessionManager = new SessionManager();
+  let aiEndpoints: AIEndpoints | null = null;
+
+  // Try Claude Agent SDK
+  try {
+    await import("@plannotator/ai/providers/claude-agent-sdk");
+    const claudePath = Bun.which("claude");
+    const provider = await createProvider({
+      type: "claude-agent-sdk",
+      cwd: process.cwd(),
+      ...(claudePath && { claudeExecutablePath: claudePath }),
+    });
+    aiRegistry.register(provider);
+  } catch {
+    // Claude SDK not available
+  }
+
+  // Try Codex SDK
+  try {
+    await import("@plannotator/ai/providers/codex-sdk");
+    // Eagerly verify the SDK is importable so we don't advertise a broken provider.
+    await import("@openai/codex-sdk");
+    const codexPath = Bun.which("codex");
+    const provider = await createProvider({
+      type: "codex-sdk",
+      cwd: process.cwd(),
+      ...(codexPath && { codexExecutablePath: codexPath }),
+    });
+    aiRegistry.register(provider);
+  } catch {
+    // Codex SDK not available
+  }
+
+  // Try Pi
+  try {
+    const { PiSDKProvider } = await import("@plannotator/ai/providers/pi-sdk");
+    const piPath = Bun.which("pi");
+    if (piPath) {
+      const provider = await createProvider({
+        type: "pi-sdk",
+        cwd: process.cwd(),
+        piExecutablePath: piPath,
+      } as PiSDKConfig);
+      if (provider instanceof PiSDKProvider) {
+        await provider.fetchModels();
+      }
+      aiRegistry.register(provider);
+    }
+  } catch {
+    // Pi not available
+  }
+
+  // Try OpenCode
+  try {
+    const { OpenCodeProvider } = await import("@plannotator/ai/providers/opencode-sdk");
+    const opencodePath = Bun.which("opencode");
+    if (opencodePath) {
+      const provider = await createProvider({
+        type: "opencode-sdk",
+        cwd: process.cwd(),
+      });
+      if (provider instanceof OpenCodeProvider) {
+        await provider.fetchModels();
+      }
+      aiRegistry.register(provider);
+    }
+  } catch {
+    // OpenCode not available
+  }
+
+  // Create endpoints if any provider registered
+  if (aiRegistry.size > 0) {
+    aiEndpoints = createAIEndpoints({
+      registry: aiRegistry,
+      sessionManager: aiSessionManager,
+      getCwd: () => {
+        if (currentDiffType.startsWith("worktree:")) {
+          const parsed = parseWorktreeDiffType(currentDiffType);
+          if (parsed) return parsed.path;
+        }
+        return gitContext?.cwd ?? process.cwd();
+      },
+    });
+  }
+
   const isRemote = isRemoteSession();
   const configuredPort = getServerPort();
+  const wslFlag = await isWSL();
+  const gitUser = detectGitUser();
 
   // Detect repo info (cached for this session)
-  const repoInfo = await getRepoInfo();
+  // In PR mode, derive from metadata instead of local git
+  const repoInfo = isPRMode
+    ? { display: getDisplayRepo(prMetadata), branch: `${getMRLabel(prMetadata)} ${getMRNumberLabel(prMetadata)}` }
+    : await getRepoInfo();
+
+  // Fetch current platform user (for own-PR/MR detection)
+  const prRef = isPRMode ? prRefFromMetadata(prMetadata) : null;
+  const platformUser = prRef ? await getPRUser(prRef) : null;
+
+  // Fetch GitHub viewed file state (non-blocking — errors are silently ignored)
+  let initialViewedFiles: string[] = [];
+  if (isPRMode && prRef) {
+    console.log("[plannotator] Fetching PR viewed files for", prRef);
+    try {
+      const viewedMap = await fetchPRViewedFiles(prRef);
+      console.log("[plannotator] PR viewed files map:", viewedMap);
+      initialViewedFiles = Object.entries(viewedMap)
+        .filter(([, isViewed]) => isViewed)
+        .map(([path]) => path);
+      console.log("[plannotator] Initial viewed files:", initialViewedFiles);
+    } catch (err) {
+      // Non-fatal: viewed state is best-effort
+      console.warn("[plannotator] Could not fetch PR viewed files:", err instanceof Error ? err.message : err);
+    }
+  }
 
   // Decision promise
   let resolveDecision: (result: {
+    approved: boolean;
     feedback: string;
     annotations: unknown[];
     agentSwitch?: string;
   }) => void;
   const decisionPromise = new Promise<{
+    approved: boolean;
     feedback: string;
     annotations: unknown[];
     agentSwitch?: string;
@@ -125,20 +254,30 @@ export async function startReviewServer(
               rawPatch: currentPatch,
               gitRef: currentGitRef,
               origin,
-              diffType: currentDiffType,
-              gitContext,
+              diffType: isPRMode ? undefined : currentDiffType,
+              gitContext: isPRMode ? undefined : gitContext,
               sharingEnabled,
               shareBaseUrl,
               repoInfo,
+              isWSL: wslFlag,
+              ...(isPRMode && { prMetadata, platformUser }),
+              ...(isPRMode && initialViewedFiles.length > 0 && { viewedFiles: initialViewedFiles }),
               ...(currentError && { error: currentError }),
+              serverConfig: getServerConfig(gitUser),
             });
           }
 
-          // API: Switch diff type
+          // API: Switch diff type (disabled in PR mode)
           if (url.pathname === "/api/diff/switch" && req.method === "POST") {
+            if (isPRMode) {
+              return Response.json(
+                { error: "Not available for PR reviews" },
+                { status: 400 },
+              );
+            }
             try {
               const body = (await req.json()) as { diffType: DiffType };
-              const newDiffType = body.diffType;
+              let newDiffType = body.diffType;
 
               if (!newDiffType) {
                 return Response.json(
@@ -147,9 +286,11 @@ export async function startReviewServer(
                 );
               }
 
-              // Run the new diff
               const defaultBranch = gitContext?.defaultBranch || "main";
-              const result = await runGitDiff(newDiffType, defaultBranch);
+              const defaultCwd = gitContext?.cwd;
+
+              // Run the new diff
+              const result = await runGitDiff(newDiffType, defaultBranch, defaultCwd);
 
               // Update state
               currentPatch = result.patch;
@@ -170,6 +311,111 @@ export async function startReviewServer(
             }
           }
 
+          // API: Fetch PR context (comments, checks, merge status) — PR mode only
+          if (url.pathname === "/api/pr-context" && req.method === "GET") {
+            if (!isPRMode) {
+              return Response.json(
+                { error: "Not in PR mode" },
+                { status: 400 },
+              );
+            }
+            try {
+              const context = await fetchPRContext(prRef!);
+              return Response.json(context);
+            } catch (err) {
+              const message =
+                err instanceof Error ? err.message : "Failed to fetch PR context";
+              return Response.json({ error: message }, { status: 500 });
+            }
+          }
+
+          // API: Get file content for expandable diff context
+          if (url.pathname === "/api/file-content" && req.method === "GET") {
+            const filePath = url.searchParams.get("path");
+            if (!filePath) {
+              return Response.json({ error: "Missing path" }, { status: 400 });
+            }
+            try { validateFilePath(filePath); } catch {
+              return Response.json({ error: "Invalid path" }, { status: 400 });
+            }
+            const oldPath = url.searchParams.get("oldPath") || undefined;
+            if (oldPath) {
+              try { validateFilePath(oldPath); } catch {
+                return Response.json({ error: "Invalid path" }, { status: 400 });
+              }
+            }
+
+            if (isPRMode) {
+              // Fetch file content from platform API using base/head SHAs
+              const [oldContent, newContent] = await Promise.all([
+                fetchPRFileContent(prRef!, prMetadata.baseSha, oldPath || filePath),
+                fetchPRFileContent(prRef!, prMetadata.headSha, filePath),
+              ]);
+              return Response.json({ oldContent, newContent });
+            }
+
+            const defaultBranch = gitContext?.defaultBranch || "main";
+            const defaultCwd = gitContext?.cwd;
+            const result = await getFileContentsForDiff(
+              currentDiffType,
+              defaultBranch,
+              filePath,
+              oldPath,
+              defaultCwd,
+            );
+            return Response.json(result);
+          }
+
+          // API: Git add / reset (stage / unstage) a file (disabled in PR mode)
+          if (url.pathname === "/api/git-add" && req.method === "POST") {
+            if (isPRMode) {
+              return Response.json(
+                { error: "Not available for PR reviews" },
+                { status: 400 },
+              );
+            }
+            try {
+              const body = (await req.json()) as { filePath: string; undo?: boolean };
+              if (!body.filePath) {
+                return Response.json({ error: "Missing filePath" }, { status: 400 });
+              }
+
+              // Determine cwd for worktree support
+              let cwd: string | undefined;
+              if (currentDiffType.startsWith("worktree:")) {
+                const parsed = parseWorktreeDiffType(currentDiffType);
+                if (parsed) cwd = parsed.path;
+              }
+              if (!cwd) {
+                cwd = gitContext?.cwd;
+              }
+
+              if (body.undo) {
+                await gitResetFile(body.filePath, cwd);
+              } else {
+                await gitAddFile(body.filePath, cwd);
+              }
+
+              return Response.json({ ok: true });
+            } catch (err) {
+              const message = err instanceof Error ? err.message : "Failed to git add";
+              return Response.json({ error: message }, { status: 500 });
+            }
+          }
+
+          // API: Update user config (write-back to ~/.plannotator/config.json)
+          if (url.pathname === "/api/config" && req.method === "POST") {
+            try {
+              const body = (await req.json()) as { displayName?: string };
+              if (body.displayName !== undefined) {
+                saveConfig({ displayName: body.displayName });
+              }
+              return Response.json({ ok: true });
+            } catch {
+              return Response.json({ error: "Invalid request" }, { status: 400 });
+            }
+          }
+
           // API: Serve images (local paths or temp uploads)
           if (url.pathname === "/api/image") {
             return handleImage(req);
@@ -185,16 +431,30 @@ export async function startReviewServer(
             return handleAgents(options.opencodeClient);
           }
 
+          // API: Annotation draft persistence
+          if (url.pathname === "/api/draft") {
+            if (req.method === "POST") return handleDraftSave(req, draftKey);
+            if (req.method === "DELETE") return handleDraftDelete(draftKey);
+            return handleDraftLoad(draftKey);
+          }
+
+          // API: Editor annotations (VS Code extension)
+          const editorResponse = await editorAnnotations.handle(req, url);
+          if (editorResponse) return editorResponse;
+
           // API: Submit review feedback
           if (url.pathname === "/api/feedback" && req.method === "POST") {
             try {
               const body = (await req.json()) as {
+                approved?: boolean;
                 feedback: string;
                 annotations: unknown[];
                 agentSwitch?: string;
               };
 
+              deleteDraft(draftKey);
               resolveDecision({
+                approved: body.approved ?? false,
                 feedback: body.feedback || "",
                 annotations: body.annotations || [],
                 agentSwitch: body.agentSwitch,
@@ -207,6 +467,76 @@ export async function startReviewServer(
               return Response.json({ error: message }, { status: 500 });
             }
           }
+
+          // API: Submit PR review directly to GitHub (PR mode only)
+          if (url.pathname === "/api/pr-action" && req.method === "POST") {
+            if (!isPRMode || !prMetadata) {
+              return Response.json({ error: "Not in PR mode" }, { status: 400 });
+            }
+            try {
+              const body = (await req.json()) as {
+                action: "approve" | "comment";
+                body: string;
+                fileComments: PRReviewFileComment[];
+              };
+
+              await submitPRReview(
+                prRef!,
+                prMetadata.headSha,
+                body.action,
+                body.body,
+                body.fileComments,
+              );
+
+              return Response.json({ ok: true, prUrl: prMetadata.url });
+            } catch (err) {
+              const message =
+                err instanceof Error ? err.message : "Failed to submit PR review";
+              return Response.json({ error: message }, { status: 500 });
+            }
+          }
+
+          // API: Mark/unmark PR files as viewed on GitHub (PR mode, GitHub only)
+          if (url.pathname === "/api/pr-viewed" && req.method === "POST") {
+            if (!isPRMode || !prMetadata) {
+              console.log("[plannotator] /api/pr-viewed: not in PR mode");
+              return Response.json({ error: "Not in PR mode" }, { status: 400 });
+            }
+            if (prMetadata.platform !== "github") {
+              console.log("[plannotator] /api/pr-viewed: platform is", prMetadata.platform, "(not github)");
+              return Response.json({ error: "Viewed sync only supported for GitHub" }, { status: 400 });
+            }
+            const prNodeId = prMetadata.prNodeId;
+            if (!prNodeId) {
+              console.log("[plannotator] /api/pr-viewed: prNodeId missing from metadata:", prMetadata);
+              return Response.json({ error: "PR node ID not available" }, { status: 400 });
+            }
+            try {
+              const body = (await req.json()) as {
+                filePaths: string[];
+                viewed: boolean;
+              };
+              console.log("[plannotator] /api/pr-viewed: marking", body.filePaths, "as viewed=", body.viewed, "prNodeId=", prNodeId);
+              await markPRFilesViewed(prRef!, prNodeId, body.filePaths, body.viewed);
+              console.log("[plannotator] /api/pr-viewed: success");
+              return Response.json({ ok: true });
+            } catch (err) {
+              const message =
+                err instanceof Error ? err.message : "Failed to update viewed state";
+              console.error("[plannotator] /api/pr-viewed error:", message);
+              return Response.json({ error: message }, { status: 500 });
+            }
+          }
+
+          // AI endpoints
+          if (aiEndpoints && url.pathname.startsWith("/api/ai/")) {
+            const handler = aiEndpoints[url.pathname as keyof AIEndpoints];
+            if (handler) return handler(req);
+            return Response.json({ error: "Not found" }, { status: 404 });
+          }
+
+          // Favicon
+          if (url.pathname === "/favicon.svg") return handleFavicon();
 
           // Serve embedded HTML for all other routes (SPA)
           return new Response(htmlContent, {
@@ -238,18 +568,23 @@ export async function startReviewServer(
     throw new Error("Failed to start server");
   }
 
-  const serverUrl = `http://localhost:${server.port}`;
+  const port = server.port!;
+  const serverUrl = `http://localhost:${port}`;
 
   // Notify caller that server is ready
   if (onReady) {
-    onReady(serverUrl, isRemote, server.port);
+    onReady(serverUrl, isRemote, port);
   }
 
   return {
-    port: server.port,
+    port,
     url: serverUrl,
     isRemote,
     waitForDecision: () => decisionPromise,
-    stop: () => server.stop(),
+    stop: () => {
+      aiSessionManager.disposeAll();
+      aiRegistry.disposeAll();
+      server.stop();
+    },
   };
 }

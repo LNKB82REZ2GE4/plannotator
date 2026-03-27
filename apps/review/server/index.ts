@@ -34,11 +34,11 @@ const gitRef = args.filter((arg) => arg !== "--staged").join(" ").trim();
 // Build git diff command
 let diffCommand: string[];
 if (isStaged) {
-  diffCommand = ["git", "diff", "--staged"];
+  diffCommand = ["git", "diff", "--no-ext-diff", "--staged"];
 } else if (gitRef) {
-  diffCommand = ["git", "diff", gitRef];
+  diffCommand = ["git", "diff", "--no-ext-diff", gitRef];
 } else {
-  diffCommand = ["git", "diff"];
+  diffCommand = ["git", "diff", "--no-ext-diff"];
 }
 
 // Execute git diff
@@ -88,6 +88,7 @@ server.stop();
 console.log(
   JSON.stringify({
     gitRef: displayRef,
+    approved: result.approved,
     feedback: result.feedback,
     annotations: result.annotations,
   }, null, 2)

@@ -8,8 +8,7 @@ steps to ensure your changes work correctly.
 1. [Development Setup](#development-setup)
 2. [Development Workflow](#development-workflow)
 3. [Quick Testing Guide](#quick-testing-guide)
-4. [UI Feature Testing Checklists](#ui-feature-testing-checklists)
-5. [Debugging Common Issues](#debugging-common-issues)
+4. [Debugging Common Issues](#debugging-common-issues)
 
 ---
 
@@ -218,21 +217,6 @@ See [tests/README.md](../tests/README.md) for additional integration and utility
    - Look for red errors
 
 6. **Test on multiple browsers** (Chrome, Firefox, Safari, Edge)
-
----
-
-## UI Feature Testing Checklists
-
-For detailed feature testing checklists, see **[UI-TESTING-CHECKLIST.md](./UI-TESTING-CHECKLIST.md)**.
-
-The checklist covers:
-
-- Table of Contents (TOC) feature
-- Annotation features
-- Sticky header
-- Responsive design
-- Accessibility
-- Performance & browser compatibility
 
 ---
 

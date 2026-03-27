@@ -5,146 +5,125 @@
  * Used by both Claude Code hook and OpenCode plugin.
  */
 
-import { $ } from "bun";
+import {
+  type DiffOption,
+  type DiffResult,
+  type DiffType,
+  type GitCommandResult,
+  type GitContext,
+  type ReviewGitRuntime,
+  type WorktreeInfo,
+  getCurrentBranch as getCurrentBranchCore,
+  getDefaultBranch as getDefaultBranchCore,
+  getWorktrees as getWorktreesCore,
+  getGitContext as getGitContextCore,
+  getFileContentsForDiff as getFileContentsForDiffCore,
+  gitAddFile as gitAddFileCore,
+  gitResetFile as gitResetFileCore,
+  parseWorktreeDiffType,
+  runGitDiff as runGitDiffCore,
+  runGitDiffWithContext as runGitDiffWithContextCore,
+  validateFilePath,
+} from "@plannotator/shared/review-core";
 
-export type DiffType =
-  | "uncommitted"
-  | "staged"
-  | "unstaged"
-  | "last-commit"
-  | "branch";
+export type {
+  DiffOption,
+  DiffType,
+  DiffResult,
+  GitContext,
+  WorktreeInfo,
+} from "@plannotator/shared/review-core";
 
-export interface DiffOption {
-  id: DiffType | "separator";
-  label: string;
-}
+async function runGit(
+  args: string[],
+  options?: { cwd?: string },
+): Promise<GitCommandResult> {
+  const proc = Bun.spawn(["git", ...args], {
+    cwd: options?.cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
 
-export interface GitContext {
-  currentBranch: string;
-  defaultBranch: string;
-  diffOptions: DiffOption[];
-}
-
-export interface DiffResult {
-  patch: string;
-  label: string;
-  error?: string;
-}
-
-/**
- * Get the current branch name
- */
-export async function getCurrentBranch(): Promise<string> {
-  try {
-    const result = await $`git rev-parse --abbrev-ref HEAD`.quiet();
-    return result.text().trim();
-  } catch {
-    return "HEAD"; // Detached HEAD state
-  }
-}
-
-/**
- * Detect the default branch (main, master, etc.)
- *
- * Strategy:
- * 1. Check origin's HEAD reference
- * 2. Fallback to checking if 'main' exists
- * 3. Final fallback to 'master'
- */
-export async function getDefaultBranch(): Promise<string> {
-  // Try origin's HEAD first (most reliable for repos with remotes)
-  try {
-    const result =
-      await $`git symbolic-ref refs/remotes/origin/HEAD`.quiet();
-    const ref = result.text().trim();
-    return ref.replace("refs/remotes/origin/", "");
-  } catch {
-    // No remote or no HEAD set - check local branches
-  }
-
-  // Fallback: check if main exists locally
-  try {
-    await $`git show-ref --verify refs/heads/main`.quiet();
-    return "main";
-  } catch {
-    // main doesn't exist
-  }
-
-  // Final fallback
-  return "master";
-}
-
-/**
- * Get git context including branch info and available diff options
- */
-export async function getGitContext(): Promise<GitContext> {
-  const [currentBranch, defaultBranch] = await Promise.all([
-    getCurrentBranch(),
-    getDefaultBranch(),
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
   ]);
 
-  const diffOptions: DiffOption[] = [
-    { id: "uncommitted", label: "Uncommitted changes" },
-    { id: "last-commit", label: "Last commit" },
-  ];
-
-  // Only show branch diff if not on default branch
-  if (currentBranch !== defaultBranch) {
-    diffOptions.push({ id: "branch", label: `vs ${defaultBranch}` });
-  }
-
-  return { currentBranch, defaultBranch, diffOptions };
+  return { stdout, stderr, exitCode };
 }
 
-/**
- * Run git diff with the specified type
- */
-export async function runGitDiff(
-  diffType: DiffType,
-  defaultBranch: string = "main"
-): Promise<DiffResult> {
-  let patch: string;
-  let label: string;
-
-  try {
-    switch (diffType) {
-      case "uncommitted":
-        patch = (await $`git diff HEAD --src-prefix=a/ --dst-prefix=b/`.quiet()).text();
-        label = "Uncommitted changes";
-        break;
-
-      case "staged":
-        patch = (await $`git diff --staged --src-prefix=a/ --dst-prefix=b/`.quiet()).text();
-        label = "Staged changes";
-        break;
-
-      case "unstaged":
-        patch = (await $`git diff --src-prefix=a/ --dst-prefix=b/`.quiet()).text();
-        label = "Unstaged changes";
-        break;
-
-      case "last-commit":
-        patch = (await $`git diff HEAD~1..HEAD --src-prefix=a/ --dst-prefix=b/`.quiet()).text();
-        label = "Last commit";
-        break;
-
-      case "branch":
-        patch = (await $`git diff ${defaultBranch}..HEAD --src-prefix=a/ --dst-prefix=b/`.quiet()).text();
-        label = `Changes vs ${defaultBranch}`;
-        break;
-
-      default:
-        patch = "";
-        label = "Unknown diff type";
+const runtime: ReviewGitRuntime = {
+  runGit,
+  async readTextFile(path: string): Promise<string | null> {
+    try {
+      return await Bun.file(path).text();
+    } catch {
+      return null;
     }
-  } catch (error) {
-    // Handle errors gracefully (e.g., no commits yet, invalid ref)
-    console.error(`Git diff error for ${diffType}:`, error);
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    patch = "";
-    label = `Error: ${diffType}`;
-    return { patch, label, error: errorMessage };
-  }
+  },
+};
 
-  return { patch, label };
+export function getCurrentBranch(): Promise<string> {
+  return getCurrentBranchCore(runtime);
 }
+
+export function getDefaultBranch(): Promise<string> {
+  return getDefaultBranchCore(runtime);
+}
+
+export function getWorktrees(): Promise<WorktreeInfo[]> {
+  return getWorktreesCore(runtime);
+}
+
+export function getGitContext(cwd?: string): Promise<GitContext> {
+  return getGitContextCore(runtime, cwd);
+}
+
+export function runGitDiff(
+  diffType: DiffType,
+  defaultBranch: string = "main",
+  cwd?: string,
+): Promise<DiffResult> {
+  return runGitDiffCore(runtime, diffType, defaultBranch, cwd);
+}
+
+export function runGitDiffWithContext(
+  diffType: DiffType,
+  gitContext: GitContext,
+): Promise<DiffResult> {
+  return runGitDiffWithContextCore(runtime, diffType, gitContext);
+}
+
+export function getFileContentsForDiff(
+  diffType: DiffType,
+  defaultBranch: string,
+  filePath: string,
+  oldPath?: string,
+  cwd?: string,
+): Promise<{ oldContent: string | null; newContent: string | null }> {
+  return getFileContentsForDiffCore(
+    runtime,
+    diffType,
+    defaultBranch,
+    filePath,
+    oldPath,
+    cwd,
+  );
+}
+
+export function gitAddFile(
+  filePath: string,
+  cwd?: string,
+): Promise<void> {
+  return gitAddFileCore(runtime, filePath, cwd);
+}
+
+export function gitResetFile(
+  filePath: string,
+  cwd?: string,
+): Promise<void> {
+  return gitResetFileCore(runtime, filePath, cwd);
+}
+
+export { parseWorktreeDiffType, validateFilePath };

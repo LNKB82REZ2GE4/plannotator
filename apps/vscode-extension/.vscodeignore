@@ -1,0 +1,10 @@
+*
+*/**
+
+!bin/*
+!dist/*
+!images/*
+!LICENSE
+!README.md
+!CHANGELOG.md
+!package.json

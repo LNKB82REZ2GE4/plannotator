@@ -35,7 +35,7 @@ The hook is defined in `hooks.json` inside the plugin directory. When installed 
           {
             "type": "command",
             "command": "plannotator",
-            "timeout": 1800
+            "timeout": 345600
           }
         ]
       }
@@ -44,7 +44,7 @@ The hook is defined in `hooks.json` inside the plugin directory. When installed 
 }
 ```
 
-The `matcher` targets the `ExitPlanMode` tool specifically. The `timeout` is in seconds (30 minutes) — plan reviews can take a while.
+The `matcher` targets the `ExitPlanMode` tool specifically. The `timeout` is in seconds (`345600` = 96 hours) — long reviews can stay open without expiring.
 
 ## Plugin configuration (OpenCode)
 
@@ -81,6 +81,26 @@ export PLANNOTATOR_BROWSER="/usr/bin/firefox"
 # Custom script
 export PLANNOTATOR_BROWSER="/path/to/my-open-script.sh"
 ```
+
+For one-off overrides without changing your shell profile, use the `--browser` flag:
+
+```bash
+plannotator review --browser "Safari"
+plannotator annotate plan.md --browser "Firefox"
+```
+
+## Session discovery
+
+If you accidentally close a Plannotator browser tab, the server is still running — you just need the URL. The `sessions` subcommand lists active sessions and can reopen them:
+
+```bash
+plannotator sessions              # list active sessions
+plannotator sessions --open       # reopen most recent session
+plannotator sessions --open 2     # reopen a specific session
+plannotator sessions --clean      # remove stale session files
+```
+
+Sessions are tracked automatically. Stale entries from crashed processes are cleaned up on the next listing.
 
 ## Disabling sharing
 

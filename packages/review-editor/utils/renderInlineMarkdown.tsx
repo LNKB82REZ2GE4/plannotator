@@ -36,8 +36,8 @@ function renderInline(text: string, startKey: number): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
   let key = startKey;
 
-  // Match inline patterns: `code`, **bold**, *italic*
-  const regex = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
+  // Match inline patterns: [text](url), `code`, **bold**, *italic*, bare URLs
+  const regex = /(\[([^\]]+)\]\((https?:\/\/[^)]+)\)|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|https?:\/\/[^\s<)\]]+)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -48,12 +48,26 @@ function renderInline(text: string, startKey: number): React.ReactNode[] {
     }
 
     const token = match[0];
-    if (token.startsWith('`')) {
+    if (match[1] && match[2] && match[3]) {
+      // Markdown link: [text](url)
+      nodes.push(
+        <a key={key++} href={match[3]} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+          {match[2]}
+        </a>
+      );
+    } else if (token.startsWith('`')) {
       nodes.push(<code key={key++} className="inline-code">{token.slice(1, -1)}</code>);
     } else if (token.startsWith('**')) {
       nodes.push(<strong key={key++}>{token.slice(2, -2)}</strong>);
     } else if (token.startsWith('*')) {
       nodes.push(<em key={key++}>{token.slice(1, -1)}</em>);
+    } else if (token.startsWith('http')) {
+      // Bare URL
+      nodes.push(
+        <a key={key++} href={token} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline break-all">
+          {token}
+        </a>
+      );
     }
 
     lastIndex = match.index + token.length;

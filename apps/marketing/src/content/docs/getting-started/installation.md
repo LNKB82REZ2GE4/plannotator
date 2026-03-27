@@ -1,6 +1,6 @@
 ---
 title: "Installation"
-description: "How to install Plannotator for Claude Code, OpenCode, and other agent hosts."
+description: "How to install Plannotator for Claude Code, OpenCode, Pi, and other agent hosts."
 sidebar:
   order: 1
 section: "Getting Started"
@@ -57,7 +57,7 @@ If you prefer not to use the plugin system, add this to your `~/.claude/settings
           {
             "type": "command",
             "command": "plannotator",
-            "timeout": 1800
+            "timeout": 345600
           }
         ]
       }
@@ -101,4 +101,29 @@ Coming soon.
 
 ## Codex
 
-Coming soon.
+Plan mode is not yet supported.
+
+Install the binary, then use it directly:
+
+```
+!plannotator review           # Code review for current changes
+!plannotator annotate file.md # Annotate a markdown file
+```
+
+## Pi
+
+Install the Pi extension:
+
+```bash
+pi install npm:@plannotator/pi-extension
+```
+
+Or try it without installing:
+
+```bash
+pi -e npm:@plannotator/pi-extension
+```
+
+Start plan mode with `pi --plan`, or toggle mid-session with `/plannotator` or `Ctrl+Alt+P`. The extension provides file-based plan review, code review (`/plannotator-review`), markdown annotation (`/plannotator-annotate`), bash safety gating during planning, and progress tracking during execution.
+
+See [Plannotator Meets Pi](/blog/plannotator-meets-pi) for the full walkthrough.

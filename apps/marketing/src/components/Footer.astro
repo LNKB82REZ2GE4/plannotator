@@ -1,30 +1,74 @@
 ---
+import { getContributors } from '../lib/contributors';
+
 const year = new Date().getFullYear();
+const contributors = await getContributors();
 ---
-<footer class="py-8 px-8 border-t border-border/30 text-center">
-  <p class="text-xs text-muted-foreground inline-flex items-center justify-center gap-1">
-    <a
-      href="https://github.com/backnotprop"
-      target="_blank"
-      rel="noopener noreferrer"
-      class="inline-flex items-center gap-1 text-foreground hover:text-primary transition-colors"
-    >
-      <svg class="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
-      </svg>
-      backnotprop
-    </a>
-    &middot;
-    <a
-      href="https://x.com/backnotprop"
-      target="_blank"
-      rel="noopener noreferrer"
-      class="text-foreground hover:text-primary transition-colors"
-    >
-      @backnotprop
-    </a>
+<footer class="py-10 px-8 border-t border-border/30">
+  <div class="grid grid-cols-2 sm:grid-cols-3 gap-6 mb-6 text-sm">
+    <div>
+      <h4 class="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Product</h4>
+      <ul class="space-y-1.5">
+        <li><a href="/docs/commands/plan-review/" class="text-muted-foreground hover:text-foreground transition-colors">Plan Review</a></li>
+        <li><a href="/docs/commands/code-review/" class="text-muted-foreground hover:text-foreground transition-colors">Code Review</a></li>
+        <li><a href="/docs/getting-started/installation/" class="text-muted-foreground hover:text-foreground transition-colors">Install</a></li>
+      </ul>
+    </div>
+    <div>
+      <h4 class="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Resources</h4>
+      <ul class="space-y-1.5">
+        <li><a href="/docs/getting-started/quickstart/" class="text-muted-foreground hover:text-foreground transition-colors">Quickstart</a></li>
+        <li><a href="/docs/guides/claude-code/" class="text-muted-foreground hover:text-foreground transition-colors">Claude Code</a></li>
+        <li><a href="/docs/guides/opencode/" class="text-muted-foreground hover:text-foreground transition-colors">OpenCode</a></li>
+        <li><a href="/blog/" class="text-muted-foreground hover:text-foreground transition-colors">Blog</a></li>
+      </ul>
+    </div>
+    <div>
+      <h4 class="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Community</h4>
+      <ul class="space-y-1.5">
+        <li><a href="https://github.com/backnotprop/plannotator" target="_blank" rel="noopener noreferrer" class="text-muted-foreground hover:text-foreground transition-colors">GitHub</a></li>
+        <li><a href="https://x.com/backnotprop" target="_blank" rel="noopener noreferrer" class="text-muted-foreground hover:text-foreground transition-colors">@backnotprop</a></li>
+        <li><a href="https://x.com/plannotator" target="_blank" rel="noopener noreferrer" class="text-muted-foreground hover:text-foreground transition-colors">@plannotator</a></li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Brand stamp -->
+  <div class="flex flex-col items-center gap-3 pt-6 border-t border-border/20 mb-3">
+    <img src="/plannotator.webp" alt="" class="w-10 h-10 object-contain -scale-x-100 opacity-70" />
+    <span class="text-xs font-semibold tracking-[-0.03em] text-muted-foreground/70">Plannotator</span>
+  </div>
+
+  <p class="text-xs text-muted-foreground/40 text-center">
+    &copy; {year} backnotprop.
   </p>
-  <p class="text-xs text-muted-foreground/60 mt-2">
-    &copy; {year} backnotprop. All rights reserved.
+  <p class="text-xs text-muted-foreground/40 text-center mt-1">
+    Licensed under <a href="https://github.com/backnotprop/plannotator/blob/main/LICENSE-MIT" target="_blank" rel="noopener noreferrer" class="hover:text-muted-foreground/50 transition-colors">MIT</a> or <a href="https://github.com/backnotprop/plannotator/blob/main/LICENSE-APACHE" target="_blank" rel="noopener noreferrer" class="hover:text-muted-foreground/50 transition-colors">Apache 2.0</a>, at your option.
   </p>
 </footer>
+
+{contributors.length > 0 && (
+  <div class="pt-6 pb-12 px-8 border-t border-border/20">
+    <p class="text-[0.6875rem] text-muted-foreground/40 text-center mb-4">Built by</p>
+    <div class="flex flex-wrap items-center justify-center gap-2">
+      {contributors.map((c) => (
+        <a
+          href={c.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`@${c.login}`}
+          class="contributor-avatar"
+        >
+          <img
+            src={`${c.avatarUrl}&s=72`}
+            alt={c.login}
+            width="36"
+            height="36"
+            loading="lazy"
+            class="rounded-full"
+          />
+        </a>
+      ))}
+    </div>
+  </div>
+)}

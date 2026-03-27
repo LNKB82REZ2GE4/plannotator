@@ -1,4 +1,5 @@
-import { Block, type Annotation, type ImageAttachment } from '../types';
+import { Block, type Annotation, type EditorAnnotation, type ImageAttachment } from '../types';
+import { planDenyFeedback } from '@plannotator/shared/feedback-templates';
 
 /**
  * Parsed YAML frontmatter as key-value pairs.
@@ -176,12 +177,15 @@ export const parseMarkdownToBlocks = (markdown: string): Block[] => {
     if (trimmed.startsWith('```')) {
       flush();
       const codeStartLine = currentLineNum;
+      // Count backticks in opening fence to support nested fences (e.g. ```` wrapping ```)
+      const fenceLen = trimmed.match(/^`+/)?.[0].length ?? 3;
+      const closingFence = new RegExp('^`{' + fenceLen + ',}\\s*$');
       // Extract language from fence (e.g., ```rust → "rust")
-      const language = trimmed.slice(3).trim() || undefined;
+      const language = trimmed.slice(fenceLen).trim() || undefined;
       // Fast forward until end of code block
       let codeContent = [];
       i++; // Skip start fence
-      while(i < lines.length && !lines[i].trim().startsWith('```')) {
+      while(i < lines.length && !closingFence.test(lines[i])) {
         codeContent.push(lines[i]);
         i++;
       }
@@ -243,7 +247,11 @@ export const parseMarkdownToBlocks = (markdown: string): Block[] => {
   return blocks;
 };
 
-export const exportAnnotations = (blocks: Block[], annotations: any[], globalAttachments: ImageAttachment[] = []): string => {
+/** Wrap feedback output with the deny preamble for pasting into agent sessions */
+export const wrapFeedbackForAgent = (feedback: string): string =>
+  planDenyFeedback(feedback);
+
+export const exportAnnotations = (blocks: Block[], annotations: any[], globalAttachments: ImageAttachment[] = [], title: string = 'Plan Feedback', subject: string = 'plan'): string => {
   if (annotations.length === 0 && globalAttachments.length === 0) {
     return 'No changes detected.';
   }
@@ -256,7 +264,7 @@ export const exportAnnotations = (blocks: Block[], annotations: any[], globalAtt
     return a.startOffset - b.startOffset;
   });
 
-  let output = `# Plan Feedback\n\n`;
+  let output = `# ${title}\n\n`;
 
   // Add global reference images section if any
   if (globalAttachments.length > 0) {
@@ -269,7 +277,7 @@ export const exportAnnotations = (blocks: Block[], annotations: any[], globalAtt
   }
 
   if (annotations.length > 0) {
-    output += `I've reviewed this plan and have ${annotations.length} piece${annotations.length > 1 ? 's' : ''} of feedback:\n\n`;
+    output += `I've reviewed this ${subject} and have ${annotations.length} piece${annotations.length > 1 ? 's' : ''} of feedback:\n\n`;
   }
 
   sortedAnns.forEach((ann, index) => {
@@ -277,11 +285,16 @@ export const exportAnnotations = (blocks: Block[], annotations: any[], globalAtt
 
     output += `## ${index + 1}. `;
 
+    // Add diff context label if annotation was created in diff view
+    if (ann.diffContext) {
+      output += `[In diff content] `;
+    }
+
     switch (ann.type) {
       case 'DELETION':
         output += `Remove this\n`;
         output += `\`\`\`\n${ann.originalText}\n\`\`\`\n`;
-        output += `> I don't want this in the plan.\n`;
+        output += `> I don't want this in the ${subject}.\n`;
         break;
 
       case 'INSERTION':
@@ -296,12 +309,19 @@ export const exportAnnotations = (blocks: Block[], annotations: any[], globalAtt
         break;
 
       case 'COMMENT':
-        output += `Feedback on: "${ann.originalText}"\n`;
-        output += `> ${ann.text}\n`;
+        if (ann.isQuickLabel) {
+          output += `[${ann.text}] Feedback on: "${ann.originalText}"\n`;
+          if (ann.quickLabelTip) {
+            output += `> ${ann.quickLabelTip}\n`;
+          }
+        } else {
+          output += `Feedback on: "${ann.originalText}"\n`;
+          output += `> ${ann.text}\n`;
+        }
         break;
 
       case 'GLOBAL_COMMENT':
-        output += `General feedback about the plan\n`;
+        output += `General feedback about the ${subject}\n`;
         output += `> ${ann.text}\n`;
         break;
     }
@@ -318,6 +338,21 @@ export const exportAnnotations = (blocks: Block[], annotations: any[], globalAtt
   });
 
   output += `---\n`;
+
+  // Quick Label Summary
+  const labeledAnns = sortedAnns.filter((a: any) => a.isQuickLabel && a.text);
+  if (labeledAnns.length > 0) {
+    const grouped = new Map<string, number>();
+    labeledAnns.forEach((a: any) => {
+      grouped.set(a.text, (grouped.get(a.text) || 0) + 1);
+    });
+
+    output += `\n## Label Summary\n\n`;
+    for (const [text, count] of grouped) {
+      output += `- **${text}**: ${count}\n`;
+    }
+    output += '\n';
+  }
 
   return output;
 };
@@ -391,6 +426,30 @@ export const exportLinkedDocAnnotations = (
       output += '\n';
     });
   }
+
+  output += `---\n`;
+  return output;
+};
+
+export const exportEditorAnnotations = (editorAnnotations: EditorAnnotation[]): string => {
+  if (editorAnnotations.length === 0) return '';
+
+  let output = `\n# Editor File Annotations\n\nThe following annotations reference code files in the project.\n\n`;
+
+  editorAnnotations.forEach((ann, index) => {
+    const lineRange = ann.lineStart === ann.lineEnd
+      ? `line ${ann.lineStart}`
+      : `lines ${ann.lineStart}-${ann.lineEnd}`;
+
+    output += `## ${index + 1}. ${ann.filePath} (${lineRange})\n`;
+    output += `\`\`\`\n${ann.selectedText}\n\`\`\`\n`;
+
+    if (ann.comment) {
+      output += `> ${ann.comment}\n`;
+    }
+
+    output += '\n';
+  });
 
   output += `---\n`;
   return output;

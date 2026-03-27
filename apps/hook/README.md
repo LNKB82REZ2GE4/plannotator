@@ -52,7 +52,7 @@ If you prefer not to use the plugin system, add this to your `~/.claude/settings
           {
             "type": "command",
             "command": "plannotator",
-            "timeout": 1800
+            "timeout": 345600
           }
         ]
       }
@@ -102,6 +102,16 @@ Host your-server
     LocalForward 9999 localhost:9999
 ```
 
+## Slash Commands
+
+The plugin registers three slash commands:
+
+| Command | Description |
+|---------|-------------|
+| `/plannotator-review` | Open code review UI for uncommitted changes or a GitHub PR |
+| `/plannotator-annotate <file.md>` | Annotate any markdown file |
+| `/plannotator-last` | Annotate the agent's last message |
+
 ## Obsidian Integration
 
 Approved plans can be automatically saved to your Obsidian vault.
@@ -133,4 +143,3 @@ tags: [plan, authentication, typescript, sql]
 ```
 
 <img width="1190" height="730" alt="image" src="https://github.com/user-attachments/assets/1f0876a0-8ace-4bcf-b0d6-4bbb07613b25" />
-

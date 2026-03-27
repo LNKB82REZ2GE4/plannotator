@@ -1,18 +1,21 @@
 /**
  * SidebarContainer — Shared sidebar shell
  *
- * Houses the Table of Contents, Version Browser, and Vault Browser views.
+ * Houses the Table of Contents, Version Browser, Vault Browser, and Archive Browser views.
  * Tab bar at top switches between them.
  */
 
 import React from "react";
 import type { SidebarTab } from "../../hooks/useSidebar";
 import type { Block, Annotation } from "../../types";
-import type { VersionInfo, VersionEntry, ProjectPlan } from "../../hooks/usePlanDiff";
+import type { VersionInfo, VersionEntry } from "../../hooks/usePlanDiff";
 import type { UseVaultBrowserReturn } from "../../hooks/useVaultBrowser";
+import type { UseFileBrowserReturn } from "../../hooks/useFileBrowser";
 import { TableOfContents } from "../TableOfContents";
 import { VersionBrowser } from "./VersionBrowser";
 import { VaultBrowser } from "./VaultBrowser";
+import { FileBrowser } from "./FileBrowser";
+import { ArchiveBrowser, type ArchivedPlan } from "./ArchiveBrowser";
 
 interface SidebarContainerProps {
   activeTab: SidebarTab;
@@ -26,6 +29,11 @@ interface SidebarContainerProps {
   onTocNavigate: (blockId: string) => void;
   linkedDocFilepath?: string | null;
   onLinkedDocBack?: () => void;
+  // File Browser props
+  showFilesTab?: boolean;
+  fileBrowser?: UseFileBrowserReturn;
+  onFilesSelectFile?: (absolutePath: string, dirPath: string) => void;
+  onFilesFetchAll?: () => void;
   // Vault Browser props
   showVaultTab?: boolean;
   vaultPath?: string;
@@ -35,7 +43,6 @@ interface SidebarContainerProps {
   // Version Browser props
   versionInfo: VersionInfo | null;
   versions: VersionEntry[];
-  projectPlans: ProjectPlan[];
   selectedBaseVersion: number | null;
   onSelectBaseVersion: (version: number) => void;
   isPlanDiffActive: boolean;
@@ -45,7 +52,12 @@ interface SidebarContainerProps {
   isSelectingVersion: boolean;
   fetchingVersion: number | null;
   onFetchVersions: () => void;
-  onFetchProjectPlans: () => void;
+  // Archive Browser props
+  showArchiveTab?: boolean;
+  archivePlans: ArchivedPlan[];
+  selectedArchiveFile: string | null;
+  onArchiveSelect: (filename: string) => void;
+  isLoadingArchive: boolean;
 }
 
 export const SidebarContainer: React.FC<SidebarContainerProps> = ({
@@ -59,6 +71,10 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
   onTocNavigate,
   linkedDocFilepath,
   onLinkedDocBack,
+  showFilesTab,
+  fileBrowser,
+  onFilesSelectFile,
+  onFilesFetchAll,
   showVaultTab,
   vaultPath,
   vaultBrowser,
@@ -66,7 +82,6 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
   onVaultFetchTree,
   versionInfo,
   versions,
-  projectPlans,
   selectedBaseVersion,
   onSelectBaseVersion,
   isPlanDiffActive,
@@ -76,7 +91,11 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
   isSelectingVersion,
   fetchingVersion,
   onFetchVersions,
-  onFetchProjectPlans,
+  showArchiveTab,
+  archivePlans,
+  selectedArchiveFile,
+  onArchiveSelect,
+  isLoadingArchive,
 }) => {
   return (
     <aside
@@ -84,7 +103,7 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
       style={{ width }}
     >
       {/* Tab bar */}
-      <div className="flex items-center border-b border-border/50 px-1 py-1 gap-0.5 flex-shrink-0">
+      <div className="flex items-center border-b border-border/50 px-1 py-1 gap-0.5 flex-shrink-0 overflow-hidden min-w-0">
         <TabButton
           active={activeTab === "toc"}
           onClick={() => onTabChange("toc")}
@@ -125,6 +144,28 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
           }
           label="Versions"
         />
+        {showFilesTab && (
+          <TabButton
+            active={activeTab === "files"}
+            onClick={() => onTabChange("files")}
+            icon={
+              <svg
+                className="w-3 h-3"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                />
+              </svg>
+            }
+            label="Files"
+          />
+        )}
         {showVaultTab && (
           <TabButton
             active={activeTab === "vault"}
@@ -147,10 +188,32 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             label="Vault"
           />
         )}
-        <div className="flex-1" />
+        {showArchiveTab && (
+          <TabButton
+            active={activeTab === "archive"}
+            onClick={() => onTabChange("archive")}
+            icon={
+              <svg
+                className="w-3 h-3"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"
+                />
+              </svg>
+            }
+            label="Archive"
+          />
+        )}
+        <div className="flex-1 min-w-0" />
         <button
           onClick={onClose}
-          className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0"
           title="Close sidebar"
         >
           <svg
@@ -186,7 +249,6 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
           <VersionBrowser
             versionInfo={versionInfo}
             versions={versions}
-            projectPlans={projectPlans}
             selectedBaseVersion={selectedBaseVersion}
             onSelectBaseVersion={onSelectBaseVersion}
             isPlanDiffActive={isPlanDiffActive}
@@ -196,7 +258,18 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             isSelectingVersion={isSelectingVersion}
             fetchingVersion={fetchingVersion}
             onFetchVersions={onFetchVersions}
-            onFetchProjectPlans={onFetchProjectPlans}
+          />
+        )}
+        {activeTab === "files" && showFilesTab && fileBrowser && (
+          <FileBrowser
+            dirs={fileBrowser.dirs}
+            expandedFolders={fileBrowser.expandedFolders}
+            onToggleFolder={fileBrowser.toggleFolder}
+            collapsedDirs={fileBrowser.collapsedDirs}
+            onToggleCollapse={fileBrowser.toggleCollapse}
+            onSelectFile={onFilesSelectFile ?? (() => {})}
+            activeFile={fileBrowser.activeFile}
+            onFetchAll={onFilesFetchAll ?? (() => {})}
           />
         )}
         {activeTab === "vault" && showVaultTab && vaultPath && vaultBrowser && (
@@ -212,6 +285,14 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             onFetchTree={onVaultFetchTree ?? (() => {})}
           />
         )}
+        {activeTab === "archive" && showArchiveTab && (
+          <ArchiveBrowser
+            plans={archivePlans}
+            selectedFile={selectedArchiveFile}
+            onSelect={onArchiveSelect}
+            isLoading={isLoadingArchive}
+          />
+        )}
       </div>
     </aside>
   );
@@ -225,7 +306,7 @@ const TabButton: React.FC<{
 }> = ({ active, onClick, icon, label }) => (
   <button
     onClick={onClick}
-    className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium transition-colors ${
+    className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium transition-colors min-w-0 shrink-0 ${
       active
         ? "bg-primary/10 text-primary"
         : "text-muted-foreground hover:text-foreground hover:bg-muted/50"

@@ -1,6 +1,6 @@
 # Plannotator for Pi
 
-Plannotator integration for the [Pi coding agent](https://github.com/mariozechner/pi). Adds file-based plan mode with a visual browser UI for reviewing, annotating, and approving agent plans.
+Plannotator integration for the [Pi coding agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent). Adds file-based plan mode with a visual browser UI for reviewing, annotating, and approving agent plans.
 
 ## Install
 
@@ -45,9 +45,9 @@ Start Pi in plan mode:
 pi --plan
 ```
 
-Or toggle it during a session with `/plannotator` or `Ctrl+Alt+P`.
+Or toggle it during a session with `/plannotator` or `Ctrl+Alt+P`. The command accepts an optional file path argument (`/plannotator plans/auth.md`) or prompts you to choose one interactively.
 
-In plan mode the agent is restricted to read-only tools. It explores your codebase, then writes a plan to `PLAN.md` using markdown checklists:
+In plan mode the agent is restricted — destructive commands are blocked, writes are limited to the plan file. It explores your codebase, then writes a plan using markdown checklists:
 
 ```markdown
 - [ ] Add validation to the login form
@@ -55,7 +55,7 @@ In plan mode the agent is restricted to read-only tools. It explores your codeba
 - [ ] Update error messages in the UI
 ```
 
-When the agent calls `exit_plan_mode`, the Plannotator UI opens in your browser. You can:
+When the agent calls `plannotator_submit_plan`, the Plannotator UI opens in your browser. You can:
 
 - **Approve** the plan to begin execution
 - **Deny with annotations** to send structured feedback back to the agent
@@ -71,6 +71,10 @@ Run `/plannotator-review` to open your current git changes in the code review UI
 
 Run `/plannotator-annotate <file.md>` to open any markdown file in the annotation UI. Useful for reviewing documentation or design specs with the agent.
 
+### Annotate last message
+
+Run `/plannotator-last` to annotate the agent's most recent response. The message opens in the annotation UI where you can highlight text, add comments, and send structured feedback back to the agent.
+
 ### Progress tracking
 
 During execution, the agent marks completed steps with `[DONE:n]` markers. Progress is shown in the status line and as a checklist widget in the terminal.
@@ -79,10 +83,12 @@ During execution, the agent marks completed steps with `[DONE:n]` markers. Progr
 
 | Command | Description |
 |---------|-------------|
-| `/plannotator` | Toggle plan mode on/off |
+| `/plannotator [path]` | Toggle plan mode. Accepts optional file path or prompts interactively |
+| `/plannotator-set-file <path>` | Change the plan file path mid-session |
 | `/plannotator-status` | Show current phase, plan file, and progress |
 | `/plannotator-review` | Open code review UI for current changes |
 | `/plannotator-annotate <file>` | Open markdown file in annotation UI |
+| `/plannotator-last` | Annotate the last assistant message |
 
 ## Flags
 
@@ -102,11 +108,12 @@ During execution, the agent marks completed steps with `[DONE:n]` markers. Progr
 The extension manages a state machine: **idle** → **planning** → **executing** → **idle**.
 
 During **planning**:
-- Tools restricted to: `read`, `bash` (read-only commands only), `grep`, `find`, `ls`, `write` (plan file only), `edit` (plan file only), `ask`, `web_search`, `fetch_content`, `get_search_content`, `exit_plan_mode`
-- `bash` is gated to a read-only allowlist, and `write`/`edit` are only allowed for the plan file
+- All tools from other extensions remain available
+- Bash is unrestricted — the agent is guided by the system prompt not to run destructive commands
+- Writes and edits restricted to the plan file only
 
 During **executing**:
-- Pre-planning tool access is restored (including extension tools that were active before entering plan mode)
+- Full tool access: `read`, `bash`, `edit`, `write`
 - Progress tracked via `[DONE:n]` markers in agent responses
 - Plan re-read from disk each turn to stay current
 

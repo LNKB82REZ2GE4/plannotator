@@ -17,6 +17,7 @@ These scripts test the UI components and require a browser.
 
 ```bash
 ./tests/manual/local/test-opencode-review.sh  # Code review UI test
+./tests/manual/local/test-worktree-review.sh  # Worktree support test (creates sandbox with 4 worktrees)
 ```
 
 See [UI-TESTING.md](../docs/UI-TESTING.md) for detailed UI testing documentation.
